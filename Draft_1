@@ -1,0 +1,1679 @@
+from __future__ import annotations
+
+import csv
+import json
+import os
+import queue
+import threading
+import time
+import traceback
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import List, Optional, Tuple, Union
+import smtplib
+from email.mime.text import MIMEText
+
+# timezone support (CST/CDT via America/Chicago)
+try:
+    from zoneinfo import ZoneInfo
+    CHI_TZ = ZoneInfo("America/Chicago")
+except Exception:
+    CHI_TZ = None
+
+# serial optional (pyserial)
+try:
+    import serial
+    from serial.serialutil import SerialException
+except Exception:
+    serial = None
+    SerialException = Exception
+
+# GUI
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, filedialog, colorchooser
+import tkinter.font as tkfont
+
+# plotting
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.figure import Figure
+from matplotlib.backends. backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.ticker import MaxNLocator
+
+# --- Defaults and constants ---
+DEFAULT_MASTER_PORT = "COM10"
+DEFAULT_SLAVE_PORT = "COM8"
+DEFAULT_BAUD_RATE = 9600
+DEFAULT_LOG_INTERVAL = 60
+DEFAULT_CUTOFF_VOLTAGE = 180
+DEFAULT_RECORD_INTERVAL_S = 1
+DEFAULT_ROTATE_HOURS = 6
+DEFAULT_IMBALANCE_LIMIT = 0.10  # 10%
+DEFAULT_IMBALANCE_TRANSITION = 0.25  # 25%
+DEFAULT_TRANSITION_DURATION = 120  # seconds
+DEFAULT_VOLTAGE_DIFF_LIMIT = 0.10  # 10%
+
+# Default power profile:  (Total Power W, Duration hours)
+DEFAULT_PROFILE = [
+    (384.615, 24),
+    (28.846, 6),
+    (1923.077, 24),
+    (384.615, 12),
+    (2940.769, 2),
+    (300.769, 5),
+]
+
+UNITS = [("days", 86400), ("hours", 3600), ("minutes", 60), ("seconds", 1)]
+LINE_STYLES = {"solid":  "-", "dashed": "--", "dotted": ":", "dashdot": "-."}
+COLOR_CHOICES = ["black", "red", "blue", "green", "orange", "purple", "brown", "grey"]
+
+
+# --- Data models ---
+@dataclass
+class ProfileRow:
+    total_power: float = 0.0  # Total power (will be split 50/50)
+    duration_value: Union[int, float] = 0
+    duration_unit: str = "seconds"
+    cutoff:  bool = False
+
+
+@dataclass
+class Settings:
+    master_port: str = DEFAULT_MASTER_PORT
+    slave_port: str = DEFAULT_SLAVE_PORT
+    baud_rate: int = DEFAULT_BAUD_RATE
+    log_interval: int = DEFAULT_LOG_INTERVAL
+    cutoff_voltage: float = DEFAULT_CUTOFF_VOLTAGE
+    dry_run: bool = False
+    timeout: float = 1.0
+    profile: List[ProfileRow] = field(default_factory=list)
+    cutoff_safety_enabled: bool = False
+    imbalance_limit: float = DEFAULT_IMBALANCE_LIMIT
+    imbalance_transition:  float = DEFAULT_IMBALANCE_TRANSITION
+    transition_duration: int = DEFAULT_TRANSITION_DURATION
+    voltage_diff_limit:  float = DEFAULT_VOLTAGE_DIFF_LIMIT
+    email_enabled: bool = False
+    email_sender: str = ""
+    email_receiver: str = ""
+    email_password: str = ""
+    email_subject: str = "IT8514B+ Load Imbalance Alert"
+
+
+# --- Instrument Controller (for master or slave) ---
+class InstrumentController:
+    def __init__(self, port: str, baud_rate: int, log_fn, name: str = "Load"):
+        self.port = port
+        self.baud_rate = baud_rate
+        self.ser = None
+        self.log = log_fn
+        self.name = name
+
+    def open(self, timeout: float = 1.0):
+        if serial is None:
+            self.log(f"[DRY-RUN] {self.name} serial not opened (pyserial missing).")
+            self.ser = None
+            return
+        try:
+            self.ser = serial.Serial(port=self.port, baudrate=self.baud_rate, timeout=timeout)
+            time.sleep(0.2)
+            try:
+                self.ser.reset_input_buffer()
+                self.ser.reset_output_buffer()
+            except Exception: 
+                pass
+            self.log(f"{self.name}:  Opened serial {self.port} @ {self.baud_rate} baud.")
+        except SerialException as e:
+            self.ser = None
+            self.log(f"[ERROR] {self.name}:  Unable to open serial port: {e}")
+            raise
+
+    def close(self):
+        if self.ser:
+            try:
+                self.ser.close()
+                self.log(f"{self. name}: Closed serial port.")
+            except Exception as e:
+                self.log(f"[WARN] {self.name}: Error closing serial:  {e}")
+        self.ser = None
+
+    def send_cmd(self, cmd: str, delay: float = 0.05):
+        if self.ser is None:
+            self.log(f"[DRY-RUN] {self.name} > {cmd}")
+            time.sleep(delay)
+            return
+        try:
+            self. ser.write((cmd + "\n").encode("utf-8"))
+            time.sleep(delay)
+            return
+        except SerialException as e:
+            self.log(f"[ERROR] {self.name}: Write failed '{cmd}': {e}")
+            raise
+
+    def read_response(self) -> Optional[str]:
+        if self. ser is None:
+            return None
+        try:
+            line = self.ser.readline()
+            if not line:
+                return None
+            return line.decode("utf-8", errors="replace").strip()
+        except SerialException as e:
+            self. log(f"[ERROR] {self.name}: Read failed: {e}")
+            return None
+
+    def query_float(self, qcmd: str, attempts: int = 3, delay_between: float = 0.05) -> Optional[float]:
+        for _ in range(attempts):
+            try:
+                self.send_cmd(qcmd)
+            except Exception:
+                time.sleep(delay_between)
+                continue
+            resp = self.read_response()
+            if not resp:
+                time.sleep(delay_between)
+                continue
+            token = resp.split()[0]. replace(",", "")
+            try:
+                return float(token)
+            except ValueError:
+                time.sleep(delay_between)
+                continue
+        return None
+
+    # SCPI-like commands
+    def set_remote(self): self.send_cmd("SYST:REM")
+    def set_local(self): self.send_cmd("SYST:LOC")
+    def set_func_cp(self): self.send_cmd("FUNC CP")
+    def set_func_pow(self): self.send_cmd("FUNC POW")
+    def set_power(self, p: float): self.send_cmd(f"POW {p}")
+    def input_on(self): self.send_cmd("INPUT ON")
+    def load_on(self): self.send_cmd("LOAD ON")
+    def input_off(self): self.send_cmd("INPUT OFF")
+    def load_off(self): self.send_cmd("LOAD OFF")
+    def read_voltage(self) -> Optional[float]:  return self.query_float("MEAS:VOLT? ")
+    def read_current(self) -> Optional[float]: return self.query_float("MEAS:CURR?")
+    def read_power(self) -> Optional[float]: return self.query_float("MEAS:POW?")
+    def set_parallel_master(self): self.send_cmd("CONF:PARA:MODE MASTER")
+    def set_parallel_slave(self): self.send_cmd("CONF: PARA:MODE SLAVE")
+    def parallel_on(self): self.send_cmd("CONF:PARA ON")
+    def parallel_off(self): self.send_cmd("CONF:PARA OFF")
+    def get_idn(self) -> Optional[str]: 
+        self.send_cmd("*IDN?")
+        return self.read_response()
+
+
+# --- Email Alert System ---
+def send_email_alert(settings: Settings, subject: str, body: str, log_fn):
+    """Send an alert email via SMTP."""
+    if not settings.email_enabled or not settings.email_password:
+        log_fn("[INFO] Email alerts not enabled or password not set.")
+        return
+    try:
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = settings.email_sender
+        msg['To'] = settings.email_receiver
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server. login(settings.email_sender, settings.email_password)
+            server.send_message(msg)
+
+        log_fn("✓ Alert email sent successfully.")
+    except Exception as e:
+        log_fn(f"✗ Failed to send email alert: {e}")
+
+
+# --- GUI row widget for profile editor ---
+class ProfileRowWidget: 
+    def __init__(self, parent, index: int, row: ProfileRow, on_delete, on_move_up, on_move_down):
+        self.parent = parent
+        self.index = index
+        self.row = row
+        self.on_delete = on_delete
+        self.on_move_up = on_move_up
+        self.on_move_down = on_move_down
+        self.frame = ttk.Frame(parent)
+
+        # Total Power entry
+        self.power_var = tk.StringVar(value=str(self.row.total_power))
+        self.power_entry = ttk. Entry(self.frame, width=12, textvariable=self. power_var)
+        self.power_entry.grid(row=0, column=0, padx=4, pady=2)
+
+        # Time entry
+        self.time_var = tk.StringVar(value=str(self.row.duration_value))
+        self.time_entry = ttk.Entry(self. frame, width=10, textvariable=self. time_var)
+        self.time_entry.grid(row=0, column=1, padx=4, pady=2)
+
+        # Unit menu
+        self.unit_var = tk.StringVar(value=self.row.duration_unit)
+        self.unit_menu = ttk.OptionMenu(self.frame, self.unit_var, self.row.duration_unit, *[u for u, _ in UNITS])
+        self.unit_menu.grid(row=0, column=2, padx=4, pady=2)
+
+        # Cutoff checkbox
+        self.cutoff_var = tk.BooleanVar(value=self.row.cutoff)
+        self.cutoff_cb = ttk.Checkbutton(self.frame, text="Cutoff", variable=self.cutoff_var, command=self._on_cutoff_toggle)
+        self.cutoff_cb.grid(row=0, column=3, padx=6, pady=2)
+
+        # Move up/down/delete
+        self.up_btn = ttk.Button(self. frame, text="↑", width=3, command=lambda: on_move_up(self.index))
+        self.up_btn.grid(row=0, column=4, padx=1)
+        self.down_btn = ttk.Button(self. frame, text="↓", width=3, command=lambda: on_move_down(self.index))
+        self.down_btn.grid(row=0, column=5, padx=1)
+        self.del_btn = ttk.Button(self.frame, text="Delete", width=6, command=lambda: on_delete(self.index))
+        self.del_btn.grid(row=0, column=6, padx=4)
+
+        # Header labels above first widget
+        if index == 0:
+            header = ttk.Frame(parent)
+            header.grid(row=0, column=0, sticky="w", pady=(4, 0))
+            ttk.Label(header, text="Total Power (W)", width=12).grid(row=0, column=0, padx=4)
+            ttk.Label(header, text="Time", width=10).grid(row=0, column=1, padx=4)
+            ttk.Label(header, text="Unit", width=10).grid(row=0, column=2, padx=4)
+            ttk.Label(header, text="", width=8).grid(row=0, column=3, padx=4)
+
+        self._on_cutoff_toggle(initial=True)
+
+    def _on_cutoff_toggle(self, initial=False):
+        checked = self.cutoff_var. get()
+        if checked:
+            self.time_entry.grid_remove()
+            self.unit_menu.grid_remove()
+        else:
+            self.time_entry.grid()
+            self.unit_menu. grid()
+        if not initial:
+            self.row.cutoff = checked
+
+    def grid(self, row_idx):
+        self.frame.grid(row=row_idx, column=0, sticky="w", pady=2)
+
+    def update_index(self, new_index):
+        self.index = new_index
+
+    def get_value(self) -> ProfileRow:
+        try:
+            power = float(self.power_var.get())
+        except Exception:
+            power = 0.0
+        cutoff = bool(self.cutoff_var. get())
+        if cutoff:
+            return ProfileRow(total_power=power, duration_value=0, duration_unit="seconds", cutoff=True)
+        try:
+            dval = float(self.time_var.get())
+        except Exception:
+            dval = 0
+        dunit = self.unit_var.get()
+        return ProfileRow(total_power=power, duration_value=dval, duration_unit=dunit, cutoff=False)
+
+    def destroy(self):
+        self.frame.destroy()
+
+
+# --- Worker thread for master-slave test ---
+class MasterSlaveWorkerThread(threading.Thread):
+    def __init__(self, settings: Settings, csv_folder: Optional[str], rotate_hours: float,
+                 record_interval_s: int, log_queue: queue.Queue, plot_queue: Optional[queue.Queue] = None):
+        super().__init__(daemon=True)
+        self.settings = settings
+        self.csv_folder = csv_folder
+        self.rotate_hours = rotate_hours
+        self.record_interval_s = max(1, int(record_interval_s))
+        self.log_queue = log_queue
+        self.plot_queue = plot_queue
+        self._stop = threading.Event()
+        self.master = InstrumentController(settings.master_port, settings.baud_rate, self._log, "MASTER")
+        self.slave = InstrumentController(settings.slave_port, settings.baud_rate, self._log, "SLAVE")
+        self.csv_file = None
+        self.csv_writer = None
+        self.current_csv_start = None
+        self.test_start_time = None
+        self. csv_lock = threading.Lock()
+
+    def _now_central(self) -> datetime: 
+        if CHI_TZ is not None:
+            return datetime.now(CHI_TZ)
+        else:
+            return datetime.now()
+
+    def _format_ts(self, dt: datetime) -> str:
+        try:
+            return dt.isoformat()
+        except Exception: 
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _log(self, msg: str):
+        ts = self._format_ts(self._now_central())
+        self.log_queue.put(f"{ts} {msg}")
+
+    def request_stop(self):
+        self._stop.set()
+
+    def _open_new_csv(self):
+        if not self.csv_folder:
+            return
+        os.makedirs(self.csv_folder, exist_ok=True)
+        start = self._now_central()
+        fname = start.strftime("master_slave_load_%Y%m%d_%H%M%S_central.csv")
+        path = os.path.join(self.csv_folder, fname)
+        f = open(path, "w", newline="", encoding="utf-8")
+        writer = csv.writer(f)
+        writer.writerow([
+            "timestamp_central",
+            "relative_seconds",
+            "step_index",
+            "total_set_power_w",
+            "master_voltage_v",
+            "master_current_a",
+            "master_power_w",
+            "slave_voltage_v",
+            "slave_current_a",
+            "slave_power_w",
+            "power_imbalance_%",
+            "current_imbalance_%",
+            "voltage_imbalance_%"
+        ])
+        self.csv_file = f
+        self. csv_writer = writer
+        self.current_csv_start = start
+        self._log(f"Opened CSV:  {path}")
+
+    def _close_csv(self):
+        if self.csv_file:
+            try:
+                self.csv_file.flush()
+                self.csv_file.close()
+                self._log("Closed CSV file.")
+            except Exception as e:
+                self._log(f"[WARN] Closing CSV failed: {e}")
+        self.csv_file = None
+        self.csv_writer = None
+        self.current_csv_start = None
+
+    def _maybe_rotate_csv(self):
+        if not self.csv_folder:
+            return
+        if self.csv_file is None:
+            self._open_new_csv()
+            return
+        if self.rotate_hours <= 0:
+            return
+        elapsed = self._now_central() - self.current_csv_start
+        if elapsed >= timedelta(hours=self.rotate_hours):
+            self._close_csv()
+            self._open_new_csv()
+
+    def _write_csv_row(self, step_idx: int, total_set_power:  float, mv, mi, mp, sv, si, sp, 
+                       power_imb, current_imb, voltage_imb):
+        if not self.csv_writer:
+            return
+        ts = self._format_ts(self._now_central())
+        rel = int((self._now_central() - self.test_start_time).total_seconds())
+        
+        row = [
+            ts, rel, step_idx, total_set_power,
+            "" if mv is None else f"{mv:.6g}",
+            "" if mi is None else f"{mi:.6g}",
+            "" if mp is None else f"{mp:.6g}",
+            "" if sv is None else f"{sv:.6g}",
+            "" if si is None else f"{si:.6g}",
+            "" if sp is None else f"{sp:.6g}",
+            f"{power_imb:.3f}",
+            f"{current_imb:.3f}",
+            f"{voltage_imb:.3f}"
+        ]
+        try:
+            with self.csv_lock:
+                self.csv_writer.writerow(row)
+                self.csv_file.flush()
+        except Exception as e:
+            self._log(f"[ERROR] Writing CSV row:  {e}")
+
+    def _push_plot_point(self, step_idx: int, mv, mi, mp, sv, si, sp):
+        if self.plot_queue is None:
+            return
+        rel = int((self._now_central() - self.test_start_time).total_seconds())
+        self.plot_queue.put((rel, step_idx, mv, mi, mp, sv, si, sp))
+
+    def _safe_shutdown(self, reason: Optional[str] = None):
+        self._log("⚠ Shutting down loads...")
+        for controller in [self.master, self. slave]:
+            try:
+                controller.load_off()
+                controller.input_off()
+                controller.parallel_off()
+                controller.set_local()
+            except Exception: 
+                pass
+        self._log("✓ Loads off and ports will close.")
+        
+        if reason and self.settings.email_enabled:
+            body = f"Loads shut down due to alert:\n\n{reason}"
+            send_email_alert(self.settings, self.settings.email_subject, body, self._log)
+
+    def run(self):
+        try:
+            self._log("=== Master-Slave Worker Thread Starting ===")
+            
+            # Open both connections
+            try:
+                self.master.open(self.settings.timeout)
+                self.slave.open(self.settings.timeout)
+            except Exception as e:
+                self._log(f"[ERROR] Opening instruments:  {e}")
+                return
+
+            # Get IDs
+            try:
+                master_id = self.master.get_idn()
+                slave_id = self.slave.get_idn()
+                self._log(f"Master ID: {master_id}")
+                self._log(f"Slave  ID: {slave_id}")
+            except Exception: 
+                pass
+
+            # Configure master-slave parallel mode
+            try:
+                self. master.set_remote()
+                self.slave.set_remote()
+                self.master.set_parallel_master()
+                self.slave. set_parallel_slave()
+                self. master.parallel_on()
+                self.slave.parallel_on()
+                self. master.set_func_pow()
+                self.slave.set_func_pow()
+                self._log("✓ Master-Slave parallel mode configured")
+            except Exception as e:
+                self._log(f"[WARN] Could not configure parallel mode: {e}")
+
+            self.test_start_time = self._now_central()
+            if self.csv_folder:
+                try:
+                    self._open_new_csv()
+                except Exception as e:
+                    self._log(f"[ERROR] Opening CSV:  {e}")
+
+            # Execute profile
+            for idx, row in enumerate(self.settings.profile, start=1):
+                if self._stop.is_set():
+                    self._log("Stop requested before starting next step.")
+                    break
+
+                total_power = float(row.total_power)
+                master_power = total_power / 2.0  # 50/50 split
+                slave_power = total_power / 2.0
+
+                if row.cutoff:
+                    dur_desc = f"until voltage < {self.settings.cutoff_voltage} V"
+                else:
+                    unit_seconds = dict(UNITS)[row.duration_unit]
+                    dur_seconds = float(row.duration_value) * unit_seconds
+                    dur_desc = f"for {dur_seconds} seconds"
+
+                self._log(f"═══ Step {idx}:  {total_power} W total ({master_power}W per load) {dur_desc} ═══")
+
+                # Set power and enable
+                try:
+                    self. master.set_power(master_power)
+                    self.slave.set_power(slave_power)
+                    self.master. load_on()
+                    self. slave.load_on()
+                except Exception as e:
+                    self._log(f"[ERROR] Failed to start step {idx}: {e}")
+                    try:
+                        self.master. load_off()
+                        self.slave.load_off()
+                    except Exception:
+                        pass
+                    continue
+
+                # Transition phase tracking
+                transition_start = time.time()
+                current_imbalance_limit = self.settings.imbalance_transition
+                self._log(f"  Transition phase:  {current_imbalance_limit*100}% imbalance allowed for {self.settings.transition_duration}s")
+
+                step_start = time.time()
+
+                if row.cutoff:
+                    # Run until cutoff
+                    while not self._stop.is_set():
+                        mv = self.master.read_voltage()
+                        mi = self.master.read_current()
+                        mp = self.master.read_power()
+                        sv = self.slave.read_voltage()
+                        si = self.slave.read_current()
+                        sp = self.slave. read_power()
+
+                        self._log(f"  M: V={mv}V I={mi}A P={mp}W | S:  V={sv}V I={si}A P={sp}W")
+
+                        # Check transition phase
+                        if time.time() - transition_start > self. settings.transition_duration:
+                            if current_imbalance_limit != self.settings.imbalance_limit:
+                                current_imbalance_limit = self.settings.imbalance_limit
+                                self._log(f"  → Normal phase: {current_imbalance_limit*100}% imbalance threshold")
+
+                        # Calculate imbalances
+                        power_imb, current_imb, voltage_imb = self._calculate_imbalances(mp, sp, mi, si, mv, sv)
+
+                        # Check imbalances
+                        if mp is not None and sp is not None and mp > 0 and sp > 0:
+                            if power_imb > current_imbalance_limit * 100:
+                                reason = f"Power imbalance >{current_imbalance_limit*100}%:  M={mp}W S={sp}W ({power_imb:.1f}%)"
+                                self._log(f"[ALERT] {reason}")
+                                self._safe_shutdown(reason)
+                                self.request_stop()
+                                break
+
+                        if mi is not None and si is not None and mi > 0 and si > 0:
+                            if current_imb > current_imbalance_limit * 100:
+                                reason = f"Current imbalance >{current_imbalance_limit*100}%: M={mi}A S={si}A ({current_imb:.1f}%)"
+                                self._log(f"[ALERT] {reason}")
+                                self._safe_shutdown(reason)
+                                self.request_stop()
+                                break
+
+                        if mv is not None and sv is not None and mv > 0 and sv > 0:
+                            if voltage_imb > self.settings.voltage_diff_limit * 100:
+                                reason = f"Voltage imbalance >{self.settings.voltage_diff_limit*100}%: M={mv}V S={sv}V ({voltage_imb:.1f}%)"
+                                self._log(f"[ALERT] {reason}")
+                                self._safe_shutdown(reason)
+                                self.request_stop()
+                                break
+
+                        # Check voltage cutoff
+                        if self.settings.cutoff_safety_enabled: 
+                            if (mv is not None and mv <= self.settings.cutoff_voltage) or \
+                               (sv is not None and sv <= self. settings.cutoff_voltage):
+                                reason = f"Voltage cutoff: M={mv}V S={sv}V <= {self.settings.cutoff_voltage}V"
+                                self._log(f"[CUTOFF] {reason}")
+                                self._safe_shutdown(reason)
+                                self.request_stop()
+                                break
+
+                        if self.csv_writer:
+                            self._maybe_rotate_csv()
+                            self._write_csv_row(idx, total_power, mv, mi, mp, sv, si, sp, 
+                                              power_imb, current_imb, voltage_imb)
+
+                        self._push_plot_point(idx, mv, mi, mp, sv, si, sp)
+
+                        for _ in range(max(1, int(self.record_interval_s))):
+                            if self._stop.is_set():
+                                break
+                            time.sleep(1)
+
+                else:
+                    # Fixed duration
+                    unit_seconds = dict(UNITS)[row.duration_unit]
+                    dur_seconds = float(row.duration_value) * unit_seconds
+                    
+                    while (time.time() - step_start) < dur_seconds and not self._stop.is_set():
+                        elapsed = int(time.time() - step_start)
+                        
+                        mv = self.master.read_voltage()
+                        mi = self. master.read_current()
+                        mp = self.master.read_power()
+                        sv = self.slave.read_voltage()
+                        si = self.slave.read_current()
+                        sp = self.slave.read_power()
+
+                        self._log(f"  [{elapsed}s/{int(dur_seconds)}s] M:  V={mv}V I={mi}A P={mp}W | S: V={sv}V I={si}A P={sp}W")
+
+                        # Check transition phase
+                        if time.time() - transition_start > self. settings.transition_duration:
+                            if current_imbalance_limit != self.settings.imbalance_limit:
+                                current_imbalance_limit = self.settings.imbalance_limit
+                                self._log(f"  → Normal phase: {current_imbalance_limit*100}% imbalance threshold")
+
+                        # Calculate imbalances
+                        power_imb, current_imb, voltage_imb = self._calculate_imbalances(mp, sp, mi, si, mv, sv)
+
+                        # Check imbalances (same as cutoff mode)
+                        if mp is not None and sp is not None and mp > 0 and sp > 0:
+                            if power_imb > current_imbalance_limit * 100:
+                                reason = f"Power imbalance >{current_imbalance_limit*100}%: M={mp}W S={sp}W ({power_imb:.1f}%)"
+                                self._log(f"[ALERT] {reason}")
+                                self._safe_shutdown(reason)
+                                self.request_stop()
+                                break
+
+                        if mi is not None and si is not None and mi > 0 and si > 0:
+                            if current_imb > current_imbalance_limit * 100:
+                                reason = f"Current imbalance >{current_imbalance_limit*100}%: M={mi}A S={si}A ({current_imb:.1f}%)"
+                                self._log(f"[ALERT] {reason}")
+                                self._safe_shutdown(reason)
+                                self.request_stop()
+                                break
+
+                        if mv is not None and sv is not None and mv > 0 and sv > 0:
+                            if voltage_imb > self.settings.voltage_diff_limit * 100:
+                                reason = f"Voltage imbalance >{self.settings. voltage_diff_limit*100}%: M={mv}V S={sv}V ({voltage_imb:.1f}%)"
+                                self._log(f"[ALERT] {reason}")
+                                self._safe_shutdown(reason)
+                                self.request_stop()
+                                break
+
+                        # Check voltage cutoff
+                        if self.settings.cutoff_safety_enabled:
+                            if (mv is not None and mv <= self.settings.cutoff_voltage) or \
+                               (sv is not None and sv <= self.settings.cutoff_voltage):
+                                reason = f"Voltage cutoff: M={mv}V S={sv}V <= {self.settings.cutoff_voltage}V"
+                                self._log(f"[CUTOFF] {reason}")
+                                self._safe_shutdown(reason)
+                                self.request_stop()
+                                break
+
+                        if self.csv_writer:
+                            self._maybe_rotate_csv()
+                            self._write_csv_row(idx, total_power, mv, mi, mp, sv, si, sp,
+                                              power_imb, current_imb, voltage_imb)
+
+                        self._push_plot_point(idx, mv, mi, mp, sv, si, sp)
+
+                        for _ in range(max(1, int(self.record_interval_s))):
+                            if self._stop.is_set():
+                                break
+                            time. sleep(1)
+
+                # Step complete
+                try:
+                    self.master. load_off()
+                    self.slave.load_off()
+                    self._log(f"✓ Step {idx} complete; LOADS OFF.")
+                except Exception as e: 
+                    self._log(f"[WARN] Could not turn LOADS OFF after step {idx}: {e}")
+
+            # Final shutdown
+            try:
+                self.master.load_off()
+                self.slave.load_off()
+                self. master.parallel_off()
+                self.slave.parallel_off()
+                self. master.set_local()
+                self.slave.set_local()
+                self._log("═══ Final shutdown:  LOADS OFF, parallel disabled, set to LOCAL ═══")
+            except Exception as e:
+                self._log(f"[WARN] Error during final shutdown: {e}")
+
+            self._log("✓ All power profile steps completed successfully.")
+
+        except Exception as exc:
+            self._log(f"[EXCEPTION] Worker:  {exc}")
+            self._log(traceback.format_exc())
+        finally:
+            try:
+                self._close_csv()
+            except Exception: 
+                pass
+            try:
+                self.master.close()
+                self.slave.close()
+            except Exception:
+                pass
+            self._log("=== Worker Finished ===")
+
+    def _calculate_imbalances(self, mp, sp, mi, si, mv, sv):
+        """Calculate power, current, voltage imbalances in %"""
+        power_imb = 0.0
+        current_imb = 0.0
+        voltage_imb = 0.0
+
+        if mp is not None and sp is not None: 
+            avg_power = (mp + sp) / 2.0
+            if avg_power > 0:
+                power_imb = abs(mp - sp) / avg_power * 100
+
+        if mi is not None and si is not None:
+            avg_current = (mi + si) / 2.0
+            if avg_current > 0:
+                current_imb = abs(mi - si) / avg_current * 100
+
+        if mv is not None and sv is not None:
+            avg_voltage = (mv + sv) / 2.0
+            if avg_voltage > 0:
+                voltage_imb = abs(mv - sv) / avg_voltage * 100
+
+        return power_imb, current_imb, voltage_imb
+
+
+# --- Main Application ---
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Master-Slave Electronic Load - Profile Editor, CSV Logger & Real-Time Plot")
+        self.geometry("1400x960")
+
+        # Settings
+        self.settings = Settings()
+        self.settings.profile = []
+        for p in DEFAULT_PROFILE:
+            power = float(p[0])
+            hours = float(p[1])
+            self.settings.profile.append(ProfileRow(total_power=power, duration_value=hours, duration_unit="hours", cutoff=False))
+
+        # Queues and worker
+        self.log_queue:  queue.Queue = queue.Queue()
+        self.plot_queue: queue.Queue = queue.Queue()
+        self.worker:  Optional[MasterSlaveWorkerThread] = None
+
+        # State
+        self.row_widgets:  List[ProfileRowWidget] = []
+        self. csv_folder: Optional[str] = None
+        self.config_save_folder: Optional[str] = None
+        self.config_filename_var = tk.StringVar(value="master_slave_config.txt")
+        self.config_load_path_var = tk.StringVar(value="")
+        self.rotate_hours_var = tk. DoubleVar(value=DEFAULT_ROTATE_HOURS)
+        self.record_interval_var = tk.IntVar(value=DEFAULT_RECORD_INTERVAL_S)
+        self.cutoff_safety_var = tk.BooleanVar(value=self.settings.cutoff_safety_enabled)
+        self.imbalance_limit_var = tk.DoubleVar(value=DEFAULT_IMBALANCE_LIMIT * 100)
+        self.imbalance_transition_var = tk.DoubleVar(value=DEFAULT_IMBALANCE_TRANSITION * 100)
+        self.transition_duration_var = tk.IntVar(value=DEFAULT_TRANSITION_DURATION)
+        self.voltage_diff_limit_var = tk.DoubleVar(value=DEFAULT_VOLTAGE_DIFF_LIMIT * 100)
+
+        # Email settings
+        self.email_enabled_var = tk.BooleanVar(value=False)
+        self.email_sender_var = tk.StringVar(value="")
+        self.email_receiver_var = tk.StringVar(value="")
+        self.email_password_var = tk.StringVar(value="")
+
+        # Plot data arrays
+        self.plot_times: List[float] = []
+        self.plot_master_voltage: List[float] = []
+        self.plot_master_current: List[float] = []
+        self.plot_master_power: List[float] = []
+        self.plot_slave_voltage: List[float] = []
+        self.plot_slave_current: List[float] = []
+        self.plot_slave_power: List[float] = []
+
+        # Status
+        self.status_top_lines = deque(maxlen=20)
+
+        # Style controls
+        self.master_color_var = tk.StringVar(value="blue")
+        self.slave_color_var = tk.StringVar(value="red")
+        self.line_width_var = tk.DoubleVar(value=1.2)
+        self.line_style_var = tk.StringVar(value="solid")
+
+        # Config note
+        self.config_note_fontsize = tk.IntVar(value=14)
+
+        # Build UI
+        self._build_ui()
+        self._periodic_log_poll()
+        self._periodic_plot_poll()
+
+    def _build_ui(self):
+        # Create main notebook for tabs
+        main_notebook = ttk.Notebook(self)
+        main_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # === TAB 1: Configuration & Control ===
+        config_tab = ttk.Frame(main_notebook)
+        main_notebook.add(config_tab, text="Configuration & Control")
+        
+        # Top area (inside config tab)
+        top_frame = ttk.Frame(config_tab)
+        top_frame.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
+    
+        # Settings frame (left)
+        settings_fr = ttk. Labelframe(top_frame, text="Master-Slave Settings", padding=(8, 6))
+        settings_fr.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+    
+        ttk.Label(settings_fr, text="Master COM: ").grid(row=0, column=0, sticky="w")
+        self.master_port_entry = ttk.Entry(settings_fr, width=12)
+        self.master_port_entry.insert(0, self.settings.master_port)
+        self.master_port_entry.grid(row=0, column=1, pady=2)
+    
+        ttk.Label(settings_fr, text="Slave COM:").grid(row=1, column=0, sticky="w")
+        self.slave_port_entry = ttk. Entry(settings_fr, width=12)
+        self.slave_port_entry.insert(0, self.settings.slave_port)
+        self.slave_port_entry.grid(row=1, column=1, pady=2)
+    
+        ttk.Label(settings_fr, text="Baud: ").grid(row=2, column=0, sticky="w")
+        self.baud_entry = ttk.Entry(settings_fr, width=12)
+        self.baud_entry.insert(0, str(self.settings.baud_rate))
+        self.baud_entry.grid(row=2, column=1, pady=2)
+    
+        self.dry_var = tk.BooleanVar(value=self.settings.dry_run)
+        ttk.Checkbutton(settings_fr, text="Dry run", variable=self.dry_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
+    
+        ttk.Label(settings_fr, text="Cutoff Voltage (V):").grid(row=4, column=0, sticky="w")
+        self.cutoff_entry = ttk.Entry(settings_fr, width=12)
+        self.cutoff_entry. insert(0, str(self. settings.cutoff_voltage))
+        self.cutoff_entry. grid(row=4, column=1, pady=2)
+        ttk. Checkbutton(settings_fr, text="Enable", variable=self.cutoff_safety_var).grid(row=4, column=2, padx=6)
+    
+        ttk. Separator(settings_fr, orient=tk. HORIZONTAL).grid(row=5, column=0, columnspan=3, sticky="ew", pady=6)
+    
+        ttk.Label(settings_fr, text="Imbalance Limit (%):").grid(row=6, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.imbalance_limit_var, width=12).grid(row=6, column=1, pady=2)
+    
+        ttk.Label(settings_fr, text="Transition Limit (%):").grid(row=7, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.imbalance_transition_var, width=12).grid(row=7, column=1, pady=2)
+    
+        ttk.Label(settings_fr, text="Transition Time (s):").grid(row=8, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.transition_duration_var, width=12).grid(row=8, column=1, pady=2)
+    
+        ttk.Label(settings_fr, text="Voltage Diff Limit (%):").grid(row=9, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.voltage_diff_limit_var, width=12).grid(row=9, column=1, pady=2)
+    
+        ttk.Separator(settings_fr, orient=tk.HORIZONTAL).grid(row=10, column=0, columnspan=3, sticky="ew", pady=6)
+    
+        ttk.Label(settings_fr, text="CSV Folder:").grid(row=11, column=0, sticky="w")
+        self.csv_folder_label = ttk.Label(settings_fr, text="(not set)", width=24)
+        self.csv_folder_label.grid(row=11, column=1, sticky="w")
+        ttk.Button(settings_fr, text="Select.. .", command=self._select_csv_folder).grid(row=11, column=2, padx=2, pady=2)
+    
+        ttk.Label(settings_fr, text="Rotate CSV (hours):").grid(row=12, column=0, sticky="w")
+        ttk. Spinbox(settings_fr, from_=0, to=168, increment=0.5, textvariable=self.rotate_hours_var, width=10).grid(row=12, column=1, pady=2)
+    
+        ttk.Label(settings_fr, text="Record interval (s):").grid(row=13, column=0, sticky="w")
+        ttk.Spinbox(settings_fr, from_=1, to=3600, textvariable=self.record_interval_var, width=10).grid(row=13, column=1, pady=2)
+    
+        ttk.Separator(settings_fr, orient=tk.HORIZONTAL).grid(row=14, column=0, columnspan=3, sticky="ew", pady=6)
+    
+        # Email settings
+        ttk. Checkbutton(settings_fr, text="Enable Email Alerts", variable=self.email_enabled_var).grid(row=15, column=0, columnspan=2, sticky="w")
+        
+        ttk.Label(settings_fr, text="Sender Email:").grid(row=16, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.email_sender_var, width=20).grid(row=16, column=1, columnspan=2, pady=2)
+    
+        ttk.Label(settings_fr, text="Receiver Email: ").grid(row=17, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.email_receiver_var, width=20).grid(row=17, column=1, columnspan=2, pady=2)
+    
+        ttk.Label(settings_fr, text="Password:").grid(row=18, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.email_password_var, show="*", width=20).grid(row=18, column=1, columnspan=2, pady=2)
+    
+        ttk.Button(settings_fr, text="Apply Settings", command=self._apply_settings).grid(row=19, column=0, columnspan=3, pady=(8, 2), sticky="ew")
+    
+        # Config save/load
+        ttk. Separator(settings_fr, orient=tk. HORIZONTAL).grid(row=20, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Label(settings_fr, text="Config Filename:").grid(row=21, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.config_filename_var, width=20).grid(row=21, column=1, columnspan=2, pady=2)
+    
+        ttk.Label(settings_fr, text="Save Folder:").grid(row=22, column=0, sticky="w")
+        self.config_save_folder_label = ttk.Label(settings_fr, text="(not set)", width=24)
+        self.config_save_folder_label.grid(row=22, column=1, sticky="w")
+        ttk.Button(settings_fr, text="Choose...", command=self._select_config_save_folder).grid(row=22, column=2, padx=2, pady=2)
+    
+        ttk.Label(settings_fr, text="Load Config:").grid(row=23, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.config_load_path_var, width=20).grid(row=23, column=1, pady=2)
+        ttk.Button(settings_fr, text="Browse...", command=self._select_config_file).grid(row=23, column=2, padx=2, pady=2)
+    
+        ttk.Button(settings_fr, text="Load Configuration", command=self._load_configuration).grid(row=24, column=0, columnspan=2, pady=4)
+        ttk.Button(settings_fr, text="Save Configuration", command=self._save_configuration).grid(row=25, column=0, columnspan=3, pady=(4, 2), sticky="ew")
+    
+        # Profile editor (center)
+        profile_fr = ttk. Labelframe(top_frame, text="Power Profile (Total Power - 50/50 Split)", padding=(8, 6))
+        profile_fr.pack(side=tk.LEFT, fill=tk. BOTH, expand=True)
+    
+        toolbar = ttk.Frame(profile_fr)
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+        ttk.Button(toolbar, text="Add Row", command=self._add_row).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar, text="Clear All", command=self._clear_all_rows).pack(side=tk.LEFT, padx=4)
+    
+        canvas = tk.Canvas(profile_fr, height=360)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk. Scrollbar(profile_fr, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        self.rows_container = ttk.Frame(canvas)
+        self.rows_container.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.rows_container, anchor="nw")
+    
+        for r in self.settings.profile:
+            self._append_row_widget(r)
+    
+        # Control (right)
+        control_fr = ttk.Labelframe(top_frame, text="Control", padding=(8, 6))
+        control_fr.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 0))
+    
+        self.start_btn = ttk.Button(control_fr, text="Start", width=16, command=self._start)
+        self.start_btn. pack(pady=6)
+        self.stop_btn = ttk.Button(control_fr, text="Stop", width=16, command=self._stop, state=tk.DISABLED)
+        self.stop_btn.pack(pady=4)
+        self.status_label = ttk.Label(control_fr, text="Idle", foreground="blue")
+        self.status_label.pack(pady=6)
+    
+        # Status (top-right)
+        status_fr = ttk. Labelframe(top_frame, text="Status", padding=(8, 6))
+        status_fr.pack(side=tk.RIGHT, fill=tk.Y)
+        self.status_top_widget = scrolledtext.ScrolledText(status_fr, wrap=tk.WORD, state=tk.DISABLED, width=40, height=12)
+        self.status_top_widget.pack(fill=tk. BOTH, expand=True)
+    
+        # Config note in config tab
+        note_fr = ttk.Labelframe(config_tab, text="Configuration Note", padding=(6, 6))
+        note_fr.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(6, 0))
+        
+        note_inner = ttk.Frame(note_fr)
+        note_inner.pack(fill=tk.BOTH, expand=True)
+        
+        self.config_note_text = tk.Text(note_inner, wrap=tk.WORD, height=6)
+        self.config_note_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.config_note_text.configure(state=tk.DISABLED)
+    
+        fs_fr = ttk.Frame(note_fr)
+        fs_fr.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(fs_fr, text="Font size:").pack(side=tk.LEFT)
+        ttk.Spinbox(fs_fr, from_=8, to=48, increment=1, textvariable=self.config_note_fontsize, width=5, command=self._apply_note_font).pack(side=tk.LEFT, padx=6)
+        ttk.Button(fs_fr, text="Refresh", command=self._update_config_note).pack(side=tk.LEFT, padx=4)
+    
+        # Log area in config tab
+        log_fr = ttk.Labelframe(config_tab, text="Log (Central Time)", padding=(8, 6))
+        log_fr.pack(side=tk. TOP, fill=tk. BOTH, expand=True, padx=8, pady=(6, 8))
+        self.log_widget = scrolledtext.ScrolledText(log_fr, wrap=tk.WORD, state=tk. DISABLED)
+        self.log_widget. pack(fill=tk.BOTH, expand=True)
+    
+        # === TAB 2: Real-Time Plots ===
+        plot_tab = ttk.Frame(main_notebook)
+        main_notebook.add(plot_tab, text="Real-Time Plots")
+        
+        # Plot controls at top
+        plot_control_frame = ttk.Frame(plot_tab)
+        plot_control_frame.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
+        
+        ttk.Label(plot_control_frame, text="Master-Slave Real-Time Monitoring", 
+                  font=('Arial', 14, 'bold')).pack(side=tk.LEFT, padx=10)
+        
+        ttk.Button(plot_control_frame, text="Clear Plots", 
+                   command=self._clear_plots).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(plot_control_frame, text="Export Plot Image", 
+                   command=self._save_plot_screenshot).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(plot_control_frame, text="Export Plot Data (CSV)", 
+                   command=self._export_plot_data).pack(side=tk.RIGHT, padx=5)
+        
+        # Main plot area
+        plot_main_frame = ttk.Frame(plot_tab)
+        plot_main_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=6)
+    
+        self.fig = Figure(figsize=(12, 8), dpi=100)
+        self.ax_power = self.fig.add_subplot(311)
+        self.ax_current = self.fig.add_subplot(312)
+        self.ax_voltage = self.fig.add_subplot(313)
+    
+        self.ax_power.set_ylabel("Power (W)", fontsize=10, fontweight='bold')
+        self.ax_current.set_ylabel("Current (A)", fontsize=10, fontweight='bold')
+        self.ax_voltage.set_ylabel("Voltage (V)", fontsize=10, fontweight='bold')
+        self.ax_voltage.set_xlabel("Time (s)", fontsize=10, fontweight='bold')
+    
+        for ax in [self.ax_power, self.ax_current, self. ax_voltage]:
+            ax. grid(True, alpha=0.3)
+    
+        (self.line_master_power,) = self.ax_power.plot([], [], color="blue", linestyle="-", linewidth=1.5, label="Master", marker='o', markersize=3)
+        (self.line_slave_power,) = self.ax_power.plot([], [], color="red", linestyle="-", linewidth=1.5, label="Slave", marker='s', markersize=3)
+        self.ax_power.legend(loc='upper right', fontsize=9)
+    
+        (self.line_master_current,) = self.ax_current.plot([], [], color="blue", linestyle="-", linewidth=1.5, label="Master", marker='o', markersize=3)
+        (self.line_slave_current,) = self.ax_current.plot([], [], color="red", linestyle="-", linewidth=1.5, label="Slave", marker='s', markersize=3)
+        self.ax_current. legend(loc='upper right', fontsize=9)
+    
+        (self.line_master_voltage,) = self.ax_voltage.plot([], [], color="blue", linestyle="-", linewidth=1.5, label="Master", marker='o', markersize=3)
+        (self.line_slave_voltage,) = self.ax_voltage.plot([], [], color="red", linestyle="-", linewidth=1.5, label="Slave", marker='s', markersize=3)
+        self.ax_voltage.legend(loc='upper right', fontsize=9)
+    
+        self.fig.tight_layout()
+    
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_main_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    
+        toolbar_mpl = NavigationToolbar2Tk(self.canvas, plot_main_frame)
+        toolbar_mpl.update()
+        toolbar_mpl.pack(side=tk. BOTTOM, fill=tk.X)
+    
+        # Right panel for plot styles
+        plot_right_panel = ttk.Frame(plot_tab)
+        plot_right_panel.pack(side=tk. RIGHT, fill=tk.Y, padx=8, pady=6)
+    
+        style_fr = ttk. Labelframe(plot_right_panel, text="Plot Appearance", padding=(8, 8))
+        style_fr.pack(side=tk.TOP, fill=tk.X)
+    
+        ttk.Label(style_fr, text="Master Color:", font=('Arial', 9, 'bold')).pack(pady=(5, 2))
+        self.master_color_display = tk.Canvas(style_fr, width=80, height=25, bg=self.master_color_var.get(), relief=tk.RIDGE, borderwidth=2)
+        self.master_color_display.pack(pady=2)
+        ttk.Button(style_fr, text="Change Master Color", command=lambda: self._choose_color(self.master_color_var)).pack(pady=2)
+        
+        ttk. Separator(style_fr, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+        
+        ttk.Label(style_fr, text="Slave Color:", font=('Arial', 9, 'bold')).pack(pady=(5, 2))
+        self.slave_color_display = tk.Canvas(style_fr, width=80, height=25, bg=self.slave_color_var.get(), relief=tk.RIDGE, borderwidth=2)
+        self.slave_color_display.pack(pady=2)
+        ttk.Button(style_fr, text="Change Slave Color", command=lambda:  self._choose_color(self. slave_color_var)).pack(pady=2)
+    
+        ttk.Separator(style_fr, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+    
+        ttk.Label(style_fr, text="Line Width: ").pack(pady=2)
+        ttk.Scale(style_fr, from_=0.5, to=5.0, variable=self.line_width_var, 
+                  orient=tk.HORIZONTAL, command=lambda _: self._apply_line_styles()).pack(pady=2, fill=tk.X, padx=5)
+        
+        ttk.Button(style_fr, text="Apply Styles", command=self._apply_line_styles, 
+                   style='Accent.TButton').pack(pady=10, fill=tk.X)
+    
+        # Statistics panel
+        stats_fr = ttk.Labelframe(plot_right_panel, text="Current Statistics", padding=(8, 8))
+        stats_fr.pack(side=tk.TOP, fill=tk. BOTH, expand=True, pady=(10, 0))
+    
+        ttk.Label(stats_fr, text="Data Points:", font=('Arial', 9, 'bold')).pack(anchor='w', pady=2)
+        self.stats_points_label = ttk.Label(stats_fr, text="0")
+        self.stats_points_label.pack(anchor='w', padx=10)
+    
+        ttk.Label(stats_fr, text="Elapsed Time:", font=('Arial', 9, 'bold')).pack(anchor='w', pady=2)
+        self.stats_time_label = ttk.Label(stats_fr, text="0 s")
+        self.stats_time_label.pack(anchor='w', padx=10)
+    
+        ttk.Label(stats_fr, text="Master Avg Power:", font=('Arial', 9, 'bold')).pack(anchor='w', pady=2)
+        self.stats_master_avg_label = ttk.Label(stats_fr, text="0.0 W")
+        self.stats_master_avg_label. pack(anchor='w', padx=10)
+    
+        ttk.Label(stats_fr, text="Slave Avg Power:", font=('Arial', 9, 'bold')).pack(anchor='w', pady=2)
+        self.stats_slave_avg_label = ttk.Label(stats_fr, text="0.0 W")
+        self.stats_slave_avg_label.pack(anchor='w', padx=10)
+    
+        # Bottom control buttons
+        bottom_fr = ttk.Frame(self)
+        bottom_fr.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(bottom_fr, text="Clear Log", command=self._clear_log).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom_fr, text="Export Log", command=self._export_log).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom_fr, text="Quit", command=self._on_quit).pack(side=tk.RIGHT, padx=5)
+    
+        self._update_config_note()
+        self._apply_line_styles()
+
+    
+    def _clear_plots(self):
+        """Clear all plot data"""
+        self.plot_times.clear()
+        self.plot_master_voltage.clear()
+        self.plot_master_current.clear()
+        self.plot_master_power.clear()
+        self.plot_slave_voltage.clear()
+        self.plot_slave_current.clear()
+        self.plot_slave_power.clear()
+        self._update_plot_lines(redraw=True)
+        self._log("Plots cleared")
+
+    def _export_plot_data(self):
+        """Export plot data to CSV"""
+        if not self.plot_times:
+            messagebox.showwarning("No Data", "No plot data to export")
+            return
+        
+        path = filedialog.asksaveasfilename(
+            title="Export Plot Data",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=f"plot_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        
+        if not path: 
+            return
+        
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Time_s', 'Master_Voltage_V', 'Master_Current_A', 'Master_Power_W',
+                               'Slave_Voltage_V', 'Slave_Current_A', 'Slave_Power_W'])
+                
+                for i in range(len(self.plot_times)):
+                    writer.writerow([
+                        self.plot_times[i],
+                        self.plot_master_voltage[i],
+                        self.plot_master_current[i],
+                        self.plot_master_power[i],
+                        self.plot_slave_voltage[i],
+                        self.plot_slave_current[i],
+                        self.plot_slave_power[i]
+                    ])
+            
+            messagebox.showinfo("Success", f"Plot data exported to:\n{path}")
+            self._log(f"Plot data exported:  {path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
+            self._log(f"[ERROR] Export failed: {e}")
+
+    # Profile row helpers
+    def _append_row_widget(self, row_model:  ProfileRow):
+        idx = len(self.row_widgets)
+        widget = ProfileRowWidget(self. rows_container, idx, row_model, on_delete=self._delete_row, on_move_up=self._move_up, on_move_down=self._move_down)
+        widget.grid(row_idx=idx + 1)
+        self.row_widgets. append(widget)
+        self._refresh_row_indices()
+
+    def _add_row(self):
+        new_row = ProfileRow(total_power=100.0, duration_value=1, duration_unit="hours", cutoff=False)
+        self.settings.profile.append(new_row)
+        self._append_row_widget(new_row)
+
+    def _delete_row(self, index):
+        if 0 <= index < len(self.row_widgets):
+            widget = self.row_widgets.pop(index)
+            widget.destroy()
+            self. settings.profile.pop(index)
+            self._rebuild_row_widgets()
+            self._log(f"Deleted row {index + 1}")
+
+    def _move_up(self, index):
+        if index <= 0 or index >= len(self.row_widgets):
+            return
+        self.settings.profile[index - 1], self.settings.profile[index] = self.settings.profile[index], self.settings.profile[index - 1]
+        self._rebuild_row_widgets()
+
+    def _move_down(self, index):
+        if index < 0 or index >= len(self.row_widgets) - 1:
+            return
+        self.settings.profile[index], self.settings.profile[index + 1] = self.settings. profile[index + 1], self.settings.profile[index]
+        self._rebuild_row_widgets()
+
+    def _clear_all_rows(self):
+        if not messagebox.askyesno("Clear all", "Remove all profile rows?"):
+            return
+        for w in self.row_widgets:
+            w.destroy()
+        self.row_widgets.clear()
+        self. settings.profile.clear()
+        self._log("Cleared all profile rows.")
+
+    def _rebuild_row_widgets(self):
+        for w in self.row_widgets:
+            w.destroy()
+        self.row_widgets = []
+        for model in self.settings.profile:
+            self._append_row_widget(model)
+
+    def _refresh_row_indices(self):
+        for i, w in enumerate(self.row_widgets):
+            w.update_index(i)
+            w.grid(row_idx=i + 1)
+
+    # CSV/config helpers
+    def _select_csv_folder(self):
+        path = filedialog.askdirectory(title="Select folder to save CSV files")
+        if not path:
+            return
+        self.csv_folder = path
+        self. csv_folder_label.config(text=path)
+        self._log(f"CSV folder set:  {path}")
+
+    def _select_config_save_folder(self):
+        path = filedialog.askdirectory(title="Select folder to save configuration")
+        if not path:
+            return
+        self.config_save_folder = path
+        try:
+            self.config_save_folder_label.config(text=path)
+        except Exception: 
+            pass
+        self._log(f"Config save folder set: {path}")
+
+    def _select_config_file(self):
+        path = filedialog.askopenfilename(title="Select configuration file", filetypes=[("Text files", "*.txt"), ("JSON files", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        self.config_load_path_var.set(path)
+        self._log(f"Selected config:  {path}")
+
+    def _save_configuration(self):
+        filename = self.config_filename_var.get().strip()
+        folder = getattr(self, "config_save_folder", None)
+        if not filename:
+            messagebox.showerror("Filename required", "Enter a filename.")
+            return
+        if not folder:
+            messagebox.showerror("Folder required", "Choose a folder.")
+            return
+        if not (filename.lower().endswith(".txt") or filename.lower().endswith(".json")):
+            filename = filename + ".txt"
+        path = os.path.join(folder, filename)
+        
+        try:
+            self._apply_settings()
+        except Exception as e:
+            self._log(f"[ERROR] Cannot save:  {e}")
+            return
+
+        cfg = {
+            "master_port": self.settings.master_port,
+            "slave_port": self.settings.slave_port,
+            "baud_rate": self.settings. baud_rate,
+            "dry_run": self.settings.dry_run,
+            "cutoff_voltage": self.settings.cutoff_voltage,
+            "cutoff_safety_enabled": self.settings.cutoff_safety_enabled,
+            "imbalance_limit": self.settings.imbalance_limit,
+            "imbalance_transition":  self.settings.imbalance_transition,
+            "transition_duration": self.settings.transition_duration,
+            "voltage_diff_limit": self.settings.voltage_diff_limit,
+            "csv_folder": self.csv_folder,
+            "rotate_hours": float(self.rotate_hours_var. get()),
+            "record_interval_s": int(self.record_interval_var.get()),
+            "email_enabled": self.settings.email_enabled,
+            "email_sender": self.settings.email_sender,
+            "email_receiver": self.settings.email_receiver,
+            "email_subject":  self.settings.email_subject,
+            "profile":  [
+                {
+                    "total_power": float(r.total_power),
+                    "duration_value": float(r.duration_value),
+                    "duration_unit": r.duration_unit,
+                    "cutoff": bool(r.cutoff)
+                } for r in self.settings.profile
+            ],
+            "plot_styles": {
+                "master_color": self.master_color_var.get(),
+                "slave_color": self. slave_color_var.get(),
+                "line_width": self.line_width_var.get(),
+                "line_style":  self.line_style_var. get()
+            },
+            "config_note": self._get_config_note_text(),
+            "config_filename": self.config_filename_var.get()
+        }
+        
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            messagebox.showinfo("Saved", f"Configuration saved to {path}")
+            self._log(f"Configuration saved:  {path}")
+            self._update_config_note()
+        except Exception as e: 
+            messagebox.showerror("Save error", f"Failed to save:  {e}")
+            self._log(f"[ERROR] Save failed: {e}")
+
+    def _load_configuration(self):
+        path = self.config_load_path_var.get().strip()
+        if not path: 
+            messagebox.showerror("No file", "Choose a configuration file.")
+            return
+        if not os.path.isfile(path):
+            messagebox.showerror("Not found", f"File not found: {path}")
+            return
+        
+        try: 
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json. load(f)
+        except Exception as e:
+            messagebox.showerror("Load error", f"Failed to read:  {e}")
+            return
+
+        try:
+            self.master_port_entry.delete(0, tk.END)
+            self.master_port_entry.insert(0, str(cfg. get("master_port", DEFAULT_MASTER_PORT)))
+            
+            self.slave_port_entry.delete(0, tk.END)
+            self.slave_port_entry.insert(0, str(cfg.get("slave_port", DEFAULT_SLAVE_PORT)))
+            
+            self.baud_entry.delete(0, tk.END)
+            self.baud_entry.insert(0, str(cfg.get("baud_rate", DEFAULT_BAUD_RATE)))
+            
+            self. dry_var.set(bool(cfg.get("dry_run", False)))
+            
+            self.cutoff_entry.delete(0, tk.END)
+            self.cutoff_entry.insert(0, str(cfg.get("cutoff_voltage", DEFAULT_CUTOFF_VOLTAGE)))
+            
+            self. cutoff_safety_var.set(bool(cfg.get("cutoff_safety_enabled", False)))
+            self.imbalance_limit_var.set(float(cfg.get("imbalance_limit", DEFAULT_IMBALANCE_LIMIT)) * 100)
+            self.imbalance_transition_var.set(float(cfg.get("imbalance_transition", DEFAULT_IMBALANCE_TRANSITION)) * 100)
+            self.transition_duration_var.set(int(cfg.get("transition_duration", DEFAULT_TRANSITION_DURATION)))
+            self.voltage_diff_limit_var.set(float(cfg.get("voltage_diff_limit", DEFAULT_VOLTAGE_DIFF_LIMIT)) * 100)
+
+            csv_folder = cfg.get("csv_folder", None)
+            if csv_folder: 
+                self.csv_folder = csv_folder
+                self.csv_folder_label.config(text=csv_folder)
+            else:
+                self.csv_folder = None
+                self.csv_folder_label.config(text="(not set)")
+
+            self.rotate_hours_var.set(float(cfg.get("rotate_hours", DEFAULT_ROTATE_HOURS)))
+            self.record_interval_var.set(int(cfg.get("record_interval_s", DEFAULT_RECORD_INTERVAL_S)))
+
+            self.email_enabled_var.set(bool(cfg. get("email_enabled", False)))
+            self.email_sender_var.set(cfg.get("email_sender", ""))
+            self.email_receiver_var.set(cfg.get("email_receiver", ""))
+
+            raw_profile = cfg.get("profile", [])
+            new_profile: List[ProfileRow] = []
+            for entry in raw_profile:
+                power = float(entry.get("total_power", 0.0))
+                cutoff = bool(entry.get("cutoff", False))
+                dur_unit = entry.get("duration_unit", "seconds")
+                dur_val = float(entry.get("duration_value", 0.0))
+                if cutoff:
+                    new_profile.append(ProfileRow(total_power=power, duration_value=0, duration_unit="seconds", cutoff=True))
+                else:
+                    if dur_unit not in [u for u, _ in UNITS]:
+                        dur_unit = "seconds"
+                    new_profile.append(ProfileRow(total_power=power, duration_value=dur_val, duration_unit=dur_unit, cutoff=False))
+
+            if not new_profile:
+                raise ValueError("Profile is empty.")
+
+            self.settings.profile = new_profile
+            self._rebuild_row_widgets()
+
+            styles = cfg.get("plot_styles", {})
+            if styles:
+                self.master_color_var.set(styles.get("master_color", "blue"))
+                self.slave_color_var.set(styles.get("slave_color", "red"))
+                self.line_width_var.set(styles.get("line_width", 1.2))
+                self.line_style_var.set(styles.get("line_style", "solid"))
+
+            note = cfg.get("config_note", "")
+            if note: 
+                self._set_config_note_text(note)
+            cfg_fname = cfg.get("config_filename", "")
+            if cfg_fname:
+                self.config_filename_var.set(cfg_fname)
+
+            self._apply_line_styles()
+            messagebox.showinfo("Loaded", f"Configuration loaded from {path}")
+            self._log(f"Configuration loaded: {path}")
+        except Exception as e:
+            messagebox.showerror("Apply error", f"Failed to apply:  {e}")
+            self._log(f"[ERROR] Apply failed: {e}")
+
+    # Logging
+    def _now_central(self) -> datetime:
+        if CHI_TZ is not None:
+            return datetime.now(CHI_TZ)
+        else:
+            return datetime.now()
+
+    def _format_ts(self, dt: datetime) -> str:
+        try:
+            return dt.isoformat()
+        except Exception:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _log(self, msg: str):
+        ts = self._format_ts(self._now_central())
+        self.log_queue.put(f"{ts} {msg}")
+
+    def _periodic_log_poll(self):
+        try:
+            while True:
+                msg = self.log_queue.get_nowait()
+                self. log_widget.configure(state=tk.NORMAL)
+                self.log_widget.insert(tk.END, msg + "\n")
+                self.log_widget.see(tk.END)
+                self.log_widget.configure(state=tk.DISABLED)
+                
+                self.status_top_lines.append(msg)
+                self.status_top_widget.configure(state=tk.NORMAL)
+                self.status_top_widget. delete("1.0", tk.END)
+                lines = list(self.status_top_lines)
+                self.status_top_widget.insert(tk.END, "\n".join(lines))
+                self.status_top_widget. see(tk.END)
+                self.status_top_widget.configure(state=tk.DISABLED)
+        except queue.Empty:
+            pass
+        self.after(200, self._periodic_log_poll)
+
+    def _clear_log(self):
+        self.log_widget.configure(state=tk. NORMAL)
+        self.log_widget.delete("1.0", tk.END)
+        self.log_widget.configure(state=tk.DISABLED)
+        self.status_top_lines.clear()
+        self.status_top_widget.configure(state=tk.NORMAL)
+        self.status_top_widget.delete("1.0", tk.END)
+        self.status_top_widget.configure(state=tk. DISABLED)
+
+    def _export_log(self):
+        path = filedialog.asksaveasfilename(title="Export log", defaultextension=".txt", filetypes=[("Text files", "*.txt")])
+        if not path: 
+            return
+        text = self.log_widget.get("1.0", tk.END)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f. write(text)
+            messagebox.showinfo("Exported", f"Log exported to {path}")
+        except Exception as e:
+            messagebox.showerror("Export error", str(e))
+
+    # Apply settings
+    def _apply_settings(self):
+        try:
+            self.settings.master_port = self.master_port_entry.get().strip() or DEFAULT_MASTER_PORT
+            self.settings.slave_port = self.slave_port_entry.get().strip() or DEFAULT_SLAVE_PORT
+            self. settings.baud_rate = int(self.baud_entry. get().strip())
+            self.settings.dry_run = bool(self.dry_var.get())
+            self.settings.cutoff_voltage = float(self.cutoff_entry. get().strip())
+            self.settings.cutoff_safety_enabled = bool(self.cutoff_safety_var. get())
+            self.settings. imbalance_limit = float(self.imbalance_limit_var.get()) / 100.0
+            self. settings.imbalance_transition = float(self.imbalance_transition_var.get()) / 100.0
+            self.settings.transition_duration = int(self.transition_duration_var.get())
+            self.settings.voltage_diff_limit = float(self.voltage_diff_limit_var.get()) / 100.0
+            
+            self.settings. email_enabled = bool(self.email_enabled_var.get())
+            self.settings.email_sender = self.email_sender_var.get().strip()
+            self.settings. email_receiver = self.email_receiver_var.get().strip()
+            self.settings.email_password = self.email_password_var.get().strip()
+
+            new_profile: List[ProfileRow] = []
+            for w in self.row_widgets:
+                pr = w.get_value()
+                new_profile.append(pr)
+            if not new_profile:
+                raise ValueError("Profile must contain at least one row.")
+            self.settings.profile = new_profile
+            
+            self._log("Settings applied.")
+            self._update_config_note()
+            return True
+        except Exception as e: 
+            messagebox.showerror("Error applying settings", str(e))
+            raise
+
+    # Start/Stop
+    def _start(self):
+        if self.worker and self.worker.is_alive():
+            messagebox.showwarning("Already running", "Test is in progress.")
+            return
+        try:
+            self._apply_settings()
+        except Exception: 
+            return
+        
+        csv_folder = self.csv_folder
+        rotate_hours = float(self.rotate_hours_var.get())
+        record_interval_s = int(self.record_interval_var.get())
+        
+        self.worker = MasterSlaveWorkerThread(self.settings, csv_folder, rotate_hours, 
+                                               record_interval_s, self. log_queue, plot_queue=self.plot_queue)
+        self.worker.start()
+        self.start_btn.config(state=tk. DISABLED)
+        self.stop_btn.config(state=tk. NORMAL)
+        self.status_label.config(text="Running", foreground="green")
+        self._log("═══ Master-Slave Test Started ═══")
+        
+        # Reset plot arrays
+        self.plot_times. clear()
+        self.plot_master_voltage.clear()
+        self.plot_master_current.clear()
+        self.plot_master_power.clear()
+        self.plot_slave_voltage.clear()
+        self.plot_slave_current.clear()
+        self.plot_slave_power.clear()
+        self._update_plot_lines(redraw=True)
+
+    def _stop(self):
+        if not self.worker or not self.worker.is_alive():
+            messagebox.showinfo("Not running", "No test is running.")
+            return
+        self.worker.request_stop()
+        self._log("Stop requested; waiting for worker...")
+        self.after(500, self._poll_worker_finish)
+
+    def _poll_worker_finish(self):
+        if self.worker and self.worker.is_alive():
+            self.after(500, self._poll_worker_finish)
+            return
+        self. start_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+        self.status_label.config(text="Idle", foreground="blue")
+        self._log("Worker stopped.")
+
+    def _on_quit(self):
+        if self.worker and self.worker. is_alive():
+            if not messagebox.askyesno("Quit", "Test is running. Stop and quit?"):
+                return
+            self.worker.request_stop()
+            for _ in range(30):
+                if not self.worker.is_alive():
+                    break
+                time.sleep(0.1)
+        self. destroy()
+
+    # Plot updates
+    def _periodic_plot_poll(self):
+        updated = False
+        try:
+            while True:
+                rel, step_idx, mv, mi, mp, sv, si, sp = self.plot_queue.get_nowait()
+                self.plot_times.append(rel)
+                self.plot_master_voltage.append(mv if mv is not None else float('nan'))
+                self.plot_master_current.append(mi if mi is not None else float('nan'))
+                self.plot_master_power.append(mp if mp is not None else float('nan'))
+                self.plot_slave_voltage.append(sv if sv is not None else float('nan'))
+                self.plot_slave_current.append(si if si is not None else float('nan'))
+                self.plot_slave_power.append(sp if sp is not None else float('nan'))
+                updated = True
+        except queue. Empty:
+            pass
+
+        if updated:
+            self._update_plot_lines()
+        self.after(500, self._periodic_plot_poll)
+
+    def _update_plot_lines(self, redraw:  bool = False):
+        if not self.plot_times:
+            return
+        
+        x = self.plot_times
+        
+        self.line_master_power.set_data(x, self.plot_master_power)
+        self.line_slave_power.set_data(x, self.plot_slave_power)
+        
+        self.line_master_current.set_data(x, self.plot_master_current)
+        self.line_slave_current.set_data(x, self.plot_slave_current)
+        
+        self.line_master_voltage.set_data(x, self.plot_master_voltage)
+        self.line_slave_voltage.set_data(x, self.plot_slave_voltage)
+    
+        x_max = max(x) if x else 10
+        
+        for ax in [self.ax_power, self.ax_current, self.ax_voltage]:
+            ax.set_xlim(0, max(10, x_max))
+            try:
+                ax.relim()
+                ax.autoscale_view(True, True, True)
+            except Exception:
+                pass
+    
+        # Update statistics
+        if hasattr(self, 'stats_points_label'):
+            self.stats_points_label.config(text=f"{len(x)}")
+            self.stats_time_label. config(text=f"{x_max:.1f} s" if x else "0 s")
+            
+            # Calculate averages (excluding NaN values)
+            valid_master_power = [p for p in self.plot_master_power if not (p != p)]  # Filter NaN
+            valid_slave_power = [p for p in self. plot_slave_power if not (p != p)]
+            
+            master_avg = sum(valid_master_power) / len(valid_master_power) if valid_master_power else 0.0
+            slave_avg = sum(valid_slave_power) / len(valid_slave_power) if valid_slave_power else 0.0
+            
+            self.stats_master_avg_label.config(text=f"{master_avg:.2f} W")
+            self.stats_slave_avg_label. config(text=f"{slave_avg:.2f} W")
+    
+        self.fig.tight_layout()
+    
+        if redraw:
+            self. canvas.draw_idle()
+        else:
+            self.canvas.draw()
+
+    # Style application
+    def _choose_color(self, color_var):
+        col = colorchooser.askcolor(title="Choose color", initialcolor=color_var.get())
+        if col and col[1]:
+            color_var.set(col[1])
+            # Update color displays
+            if hasattr(self, 'master_color_display') and color_var == self.master_color_var:
+                self.master_color_display.config(bg=col[1])
+            if hasattr(self, 'slave_color_display') and color_var == self.slave_color_var:
+                self. slave_color_display.config(bg=col[1])
+            self._apply_line_styles()
+    
+    def _apply_line_styles(self):
+        try:
+            master_color = self.master_color_var.get()
+            slave_color = self.slave_color_var.get()
+            
+            self.line_master_power.set_color(master_color)
+            self.line_slave_power.set_color(slave_color)
+            
+            self.line_master_current.set_color(master_color)
+            self.line_slave_current.set_color(slave_color)
+            
+            self.line_master_voltage.set_color(master_color)
+            self.line_slave_voltage.set_color(slave_color)
+
+            self._update_plot_lines(redraw=True)
+            self._log("Applied plot styles.")
+        except Exception as e:
+            self._log(f"[ERROR] Applying styles: {e}")
+
+    # Config note
+    def _get_config_note_text(self) -> str:
+        fname = self.config_filename_var.get().strip()
+        note = f"Master-Slave Configuration\n"
+        note += f"==========================\n\n"
+        note += f"Config File: {fname if fname else 'Not set'}\n\n"
+        note += f"Master Port: {self.settings.master_port}\n"
+        note += f"Slave Port: {self.settings.slave_port}\n"
+        note += f"Baud Rate: {self. settings.baud_rate}\n\n"
+        note += f"Imbalance Limit: {self. settings.imbalance_limit*100:.1f}%\n"
+        note += f"Transition Limit: {self.settings.imbalance_transition*100:.1f}%\n"
+        note += f"Transition Duration: {self.settings.transition_duration}s\n\n"
+        note += f"Voltage Cutoff: {self.settings.cutoff_voltage}V\n"
+        note += f"Cutoff Safety: {'Enabled' if self.settings.cutoff_safety_enabled else 'Disabled'}\n\n"
+        note += f"Email Alerts: {'Enabled' if self. settings.email_enabled else 'Disabled'}\n"
+        note += f"Profile Steps: {len(self.settings.profile)}\n"
+        return note
+
+    def _set_config_note_text(self, text: str):
+        self.config_note_text. configure(state=tk.NORMAL)
+        self.config_note_text. delete("1.0", tk. END)
+        self.config_note_text.insert(tk. END, text)
+        self._apply_note_font()
+        self.config_note_text.configure(state=tk.DISABLED)
+
+    def _update_config_note(self):
+        text = self._get_config_note_text()
+        self._set_config_note_text(text)
+
+    def _apply_note_font(self):
+        sz = int(self.config_note_fontsize. get())
+        f = tkfont.Font(family="TkDefaultFont", size=sz)
+        self.config_note_text.configure(font=f)
+
+    # Save screenshot
+    def _save_plot_screenshot(self):
+        path = filedialog.asksaveasfilename(title="Save plot", defaultextension=".png",
+                                            filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg;*.jpeg"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            self.fig.savefig(path)
+            messagebox.showinfo("Saved", f"Plot saved to {path}")
+            self._log(f"Plot screenshot saved:  {path}")
+        except Exception as e:
+            messagebox.showerror("Save error", str(e))
+            self._log(f"[ERROR] Failed to save plot: {e}")
+
+
+def main():
+    app = App()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
