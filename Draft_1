@@ -213,6 +213,40 @@ class InstrumentController:
         self.send_cmd("*IDN?")
         return self.read_response()
 
+    def set_mode_cw(self):
+        """Set instrument to Constant Power (CW) mode"""
+        try:
+            # Try format 1: MODE: CW (no space)
+            cmd = "MODE:CW\n"
+            self. ser.write(cmd.encode('ascii'))
+            time.sleep(0.2)
+            self.log(f"{self.name}:  Sent MODE:CW command")
+            
+            # Verify by reading back mode
+            self.ser.write(b"MODE?\n")
+            time.sleep(0.2)
+            if self.ser.in_waiting:
+                response = self.ser.read(self.ser.in_waiting).decode('ascii').strip()
+                self.log(f"{self.name}: Current mode: {response}")
+                if "CW" in response. upper() or "POW" in response.upper():
+                    self.log(f"{self.name}: ✓ Successfully set to CW mode")
+                    return
+            
+            # If that didn't work, try format 2: MODE POW
+            self.log(f"{self.name}:  Trying alternate command:  MODE POW")
+            cmd = "MODE POW\n"
+            self.ser.write(cmd.encode('ascii'))
+            time.sleep(0.2)
+            
+            # Verify again
+            self.ser.write(b"MODE?\n")
+            time.sleep(0.2)
+            if self.ser.in_waiting:
+                response = self.ser.read(self.ser.in_waiting).decode('ascii').strip()
+                self.log(f"{self.name}: Current mode: {response}")
+                
+        except Exception as e:
+            self.log(f"{self.name}: [ERROR] Setting CW mode: {e}")
 
 # --- Email Alert System ---
 def send_email_alert(settings: Settings, subject: str, body: str, log_fn):
@@ -1363,19 +1397,19 @@ class App(tk.Tk):
         # Config save/load
         ttk. Separator(settings_fr, orient=tk. HORIZONTAL).grid(row=22, column=0, columnspan=3, sticky="ew", pady=6)
         ttk.Label(settings_fr, text="Config Filename:").grid(row=23, column=0, sticky="w")
-        ttk.Entry(settings_fr, textvariable=self.config_filename_var, width=20).grid(row=23, column=1, columnspan=2, pady=2)
+        ttk.Entry(settings_fr, textvariable=self.config_filename_var, width=20).grid(row=23, column=1, columnspan=2, pady=2, sticky="ew")
     
         ttk.Label(settings_fr, text="Save Folder:").grid(row=24, column=0, sticky="w")
         self.config_save_folder_label = ttk.Label(settings_fr, text="(not set)", width=24)
         self.config_save_folder_label.grid(row=24, column=1, sticky="w")
         ttk.Button(settings_fr, text="Choose...", command=self._select_config_save_folder).grid(row=24, column=2, padx=2, pady=2)
     
-        ttk.Label(settings_fr, text="Load Config:").grid(row=25, column=0, sticky="w")
-        ttk.Entry(settings_fr, textvariable=self.config_load_path_var, width=20).grid(row=25, column=1, pady=2)
-        ttk.Button(settings_fr, text="Browse...", command=self._select_config_file).grid(row=25, column=2, padx=2, pady=2)
+        ttk.Label(settings_fr, text="Load Config:").grid(row=26, column=0, sticky="w")
+        ttk.Entry(settings_fr, textvariable=self.config_load_path_var, width=20).grid(row=26, column=1, pady=2, sticky="ew")
+        ttk.Button(settings_fr, text="Browse...", command=self._select_config_file).grid(row=26, column=2, padx=2, pady=2)
     
-        ttk.Button(settings_fr, text="Load Configuration", command=self._load_configuration).grid(row=26, column=0, columnspan=2, pady=4)
-        ttk.Button(settings_fr, text="Save Configuration", command=self._save_configuration).grid(row=27, column=0, columnspan=3, pady=(4, 2), sticky="ew")
+        ttk.Button(settings_fr, text="Load Configuration", command=self._load_configuration).grid(row=27, column=0, columnspan=3, pady=(4, 2), sticky="ew")
+        ttk.Button(settings_fr, text="Save Configuration", command=self._save_configuration).grid(row=25, column=0, columnspan=3, pady=(4, 2), sticky="ew")
     
         # Profile editor (center)
         profile_fr = ttk. Labelframe(top_frame, text="Power Profile (Total Power - 50/50 Split)", padding=(8, 6))
@@ -1397,18 +1431,41 @@ class App(tk.Tk):
     
         for r in self.settings.profile:
             self._append_row_widget(r)
-    
-        # Control (right)
-        control_fr = ttk.Labelframe(top_frame, text="Control", padding=(8, 6))
-        control_fr.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 0))
-    
-        self.start_btn = ttk.Button(control_fr, text="Start", width=16, command=self._start)
-        self.start_btn. pack(pady=6)
-        self.stop_btn = ttk.Button(control_fr, text="Stop", width=16, command=self._stop, state=tk.DISABLED)
-        self.stop_btn.pack(pady=4)
-        self.status_label = ttk.Label(control_fr, text="Idle", foreground="blue")
-        self.status_label.pack(pady=6)
 
+        # Control buttons
+        control_button_frame = ttk. Frame(top_frame)
+        control_button_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
+        
+        ttk.Label(control_button_frame, text="Test Control:", font=('Arial', 11, 'bold')).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        
+        self.start_btn = ttk.Button(control_button_frame, text="▶ Start Test", 
+                                     command=self._start, 
+                                     width=20)
+        self.start_btn. grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+        
+        self.stop_btn = ttk.Button(control_button_frame, text="⏹ Stop Test", 
+                                    command=self._stop, 
+                                    state=tk.DISABLED, 
+                                    width=20)
+        self.stop_btn.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        
+        # Make columns expand equally
+        control_button_frame. columnconfigure(0, weight=1)
+        control_button_frame.columnconfigure(1, weight=1)
+    
+        # # Control (right)
+        # control_fr = ttk.Labelframe(top_frame, text="Control", padding=(8, 6))
+        # control_fr.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 0))
+    
+        # self.start_btn = ttk.Button(control_fr, text="Start", width=16, command=self._start)
+        # self.start_btn. pack(pady=6)
+        # self.stop_btn = ttk.Button(control_fr, text="Stop", width=16, command=self._stop, state=tk.DISABLED)
+        # self.stop_btn.pack(pady=4)
+        # self.status_label = ttk.Label(control_fr, text="Idle", foreground="blue")
+        # self.status_label.pack(pady=6)
+        # self.status_label = ttk.Label(control_fr, text="Idle", foreground="blue")
+        # self.status_label.pack(pady=6)
+        
         # === Test Logs Section (renamed from Status) ===
         log_frame = ttk.LabelFrame(top_frame, text="Test Logs", padding=(10, 10))
         log_frame.pack(side=tk. BOTTOM, fill=tk. BOTH, expand=True, padx=10, pady=(5, 10))
@@ -2472,57 +2529,257 @@ class App(tk.Tk):
 
     # Start/Stop
     def _start(self):
-        """Start the test"""
-        if self.worker and self.worker. is_alive():
+        """Start the test with automatic pretest conditioning"""
+        if self. worker and self.worker.is_alive():
             messagebox.showwarning("Already running", "Test is in progress.")
             return
         
-        # STRICT: CSV folder is REQUIRED
-        if not self.csv_folder or not os.path. isdir(self.csv_folder):
-            messagebox.showerror(
-                "CSV Folder Required",
-                "CSV folder must be selected before starting the test.\n\n"
-                "This ensures all data is recorded without fail.\n\n"
-                "Please select a CSV folder in the settings panel.",
-                icon='error'
+        # Check if CSV folder is selected
+        if not self.csv_folder or not os.path.isdir(self.csv_folder):
+            response = messagebox.askyesno(
+                "CSV Folder Not Set",
+                "CSV folder is not selected or invalid.\n\n"
+                "Data logging will NOT be saved to CSV files.\n\n"
+                "Do you want to select a CSV folder now?\n\n"
+                "Click 'Yes' to select folder\n"
+                "Click 'No' to continue without CSV logging (NOT RECOMMENDED)",
+                icon='warning'
             )
-            self._log("[ERROR] Cannot start:  CSV folder not selected")
-            
-            # Highlight the CSV folder section (optional visual feedback)
-            self.csv_folder_label.config(foreground="red", font=('Arial', 9, 'bold'))
-            self.after(3000, lambda: self.csv_folder_label.config(foreground="black", font=('Arial', 9)))
-            return
+            if response:
+                self._select_csv_folder()
+                if not self.csv_folder or not os.path.isdir(self.csv_folder):
+                    messagebox.showerror(
+                        "Cannot Start",
+                        "CSV folder must be selected to ensure data is recorded.\n\n"
+                        "Test cannot start without valid CSV folder."
+                    )
+                    self._log("[ERROR] Test start aborted: CSV folder not selected")
+                    return
+            else:
+                messagebox.showwarning(
+                    "Test Cancelled",
+                    "Test cancelled. Please select a CSV folder to ensure data recording."
+                )
+                self._log("[WARNING] Test start cancelled:  CSV folder not selected")
+                return
         
+        # Apply settings
         try:
             self._apply_settings()
         except Exception: 
             return
         
-        csv_folder = self.csv_folder
-        rotate_hours = float(self.rotate_hours_var.get())
-        record_interval_s = int(self.record_interval_var.get())
+        # Confirm start with user - mention conditioning
+        response = messagebox.askyesno(
+            "Start Test",
+            "Ready to start test.\n\n"
+            "The system will automatically:\n"
+            "1. Condition instruments (REMOTE, CW mode, 0W, etc.)\n"
+            "2. Execute the power profile\n"
+            "3. Log all data to CSV files\n\n"
+            "Continue? ",
+            icon='question'
+        )
         
-        self.worker = MasterSlaveWorkerThread(self.settings, csv_folder, rotate_hours, 
-                                               record_interval_s, self.log_queue, plot_queue=self. plot_queue)
-        self.worker.start()
-        self.start_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
-        self.status_label.config(text="Running", foreground="green")
-        self._log("═══ Master-Slave Test Started ═══")
-        self._log(f"✓ CSV logging enabled: {csv_folder}")
+        if not response:
+            self._log("Test start cancelled by user")
+            return
         
-        # Reset plot arrays
-        self.plot_times.clear()
-        self.plot_total_power.clear()
-        self.plot_total_current.clear()
-        self.plot_avg_voltage.clear()
-        self.plot_cumulative_energy.clear()
-        self.plot_cumulative_capacity.clear()
-        self.plot_dqdv_voltage.clear()
-        self.plot_dqdv_values. clear()
-        self._update_plot_lines(redraw=True)
-        if hasattr(self, '_update_dqdv_plot'):
-            self._update_dqdv_plot(redraw=True)
+        # Disable start button and update status
+        self.start_btn. config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk. DISABLED)  # Disable until conditioning completes
+        self. status_label.config(text="Conditioning instruments.. .", foreground="orange")
+        self._log("═══ Starting Test Sequence ═══")
+        
+        # Run conditioning in a separate thread, then start test
+        import threading
+        conditioning_thread = threading.Thread(target=self._condition_and_start, daemon=True)
+        conditioning_thread.start()
+    
+    def _condition_and_start(self):
+        """Run conditioning, then start the test (runs in separate thread)"""
+        master = None
+        slave = None
+        conditioning_success = False
+        
+        try: 
+            # === CONDITIONING PHASE ===
+            self._log("─── Phase 1: Instrument Conditioning ───")
+            
+            # Create instrument controllers
+            self._log("Opening connections to instruments...")
+            master = InstrumentController(
+                self.settings. master_port, 
+                self.settings.baud_rate, 
+                self._log, 
+                "MASTER"
+            )
+            slave = InstrumentController(
+                self.settings.slave_port, 
+                self.settings.baud_rate, 
+                self._log, 
+                "SLAVE"
+            )
+            
+            # Open connections
+            master.open(self.settings.timeout)
+            slave.open(self.settings.timeout)
+            self._log("✓ Connections established")
+            
+            # Step 1: Set to REMOTE mode
+            self._log("Step 1: Setting REMOTE mode...")
+            master.set_remote()
+            slave.set_remote()
+            time.sleep(0.5)
+            self._log("  ✓ Both instruments in REMOTE mode")
+            
+            # Step 2: Set to Constant Power (CW) mode
+            self._log("Step 2: Setting Constant Power (CW) mode...")
+            master.set_mode_cw()
+            slave.set_mode_cw()
+            time.sleep(0.5)
+            self._log("  ✓ Both instruments in CW mode")
+            
+            # Step 3: Set power to 0W
+            self._log("Step 3: Setting power to 0W...")
+            master.set_power(0.0)
+            slave.set_power(0.0)
+            time.sleep(0.5)
+            self._log("  ✓ Power set to 0W")
+            
+            # Step 4: Turn INPUT ON
+            self._log("Step 4: Turning INPUT ON...")
+            master.input_on()
+            slave.input_on()
+            time.sleep(0.5)
+            self._log("  ✓ INPUT ON for both instruments")
+            
+            # Step 5: Enable PARALLEL mode
+            self._log("Step 5: Enabling PARALLEL mode...")
+            master.parallel_on()
+            slave.parallel_on()
+            time.sleep(0.5)
+            self._log("  ✓ PARALLEL mode enabled")
+            
+            # Step 6: Turn LOAD ON
+            self._log("Step 6: Turning LOAD ON...")
+            master.load_on()
+            slave.load_on()
+            time.sleep(0.5)
+            self._log("  ✓ LOAD ON for both instruments")
+            
+            # Verify configuration
+            self._log("Verifying configuration...")
+            time.sleep(1.0)
+            
+            # Read back power settings
+            master_power = master.read_power()
+            slave_power = slave.read_power()
+            self._log(f"  Master Power: {master_power}W")
+            self._log(f"  Slave Power: {slave_power}W")
+            
+            conditioning_success = True
+            self._log("✓ Conditioning COMPLETE - instruments ready")
+            
+        except Exception as e:
+            self._log(f"[ERROR] Conditioning failed:  {e}")
+            import traceback
+            self._log(traceback.format_exc())
+            
+            # Try to return to safe state
+            self._log("Attempting to return to safe state...")
+            try:
+                if master:
+                    master.set_power(0.0)
+                    master.load_off()
+                    master. set_local()
+                if slave:
+                    slave.set_power(0.0)
+                    slave.load_off()
+                    slave.set_local()
+                self._log("  ✓ Instruments returned to safe state")
+            except Exception:
+                pass
+        
+        finally:
+            # Close conditioning connections
+            try:
+                if master:
+                    master.close()
+                if slave:
+                    slave.close()
+                self._log("✓ Conditioning connections closed")
+            except Exception: 
+                pass
+        
+        # Update UI and start test if conditioning succeeded
+        if conditioning_success: 
+            self. after(0, self._start_test_after_conditioning)
+        else:
+            self.after(0, self._conditioning_failed)
+    
+    def _start_test_after_conditioning(self):
+        """Start the actual test after successful conditioning (called on main thread)"""
+        try:
+            self._log("─── Phase 2: Starting Test Execution ───")
+            
+            csv_folder = self.csv_folder
+            rotate_hours = float(self.rotate_hours_var.get())
+            record_interval_s = int(self.record_interval_var.get())
+            
+            # Create and start worker thread
+            self.worker = MasterSlaveWorkerThread(
+                self.settings, 
+                csv_folder, 
+                rotate_hours, 
+                record_interval_s, 
+                self. log_queue, 
+                plot_queue=self.plot_queue
+            )
+            self.worker.start()
+            
+            # Update UI
+            self. start_btn.config(state=tk.DISABLED)
+            self.stop_btn.config(state=tk. NORMAL)
+            self.status_label.config(text="Running Test", foreground="green")
+            self._log("═══ Test Execution Started ═══")
+            self._log(f"✓ CSV logging:  {csv_folder}")
+            
+            # Reset plot arrays
+            self.plot_times.clear()
+            self.plot_total_power.clear()
+            self.plot_total_current.clear()
+            self.plot_avg_voltage.clear()
+            self.plot_cumulative_energy.clear()
+            self.plot_cumulative_capacity.clear()
+            self.plot_dqdv_voltage.clear()
+            self.plot_dqdv_values.clear()
+            self._update_plot_lines(redraw=True)
+            if hasattr(self, '_update_dqdv_plot'):
+                self._update_dqdv_plot(redraw=True)
+                
+        except Exception as e:
+            self._log(f"[ERROR] Failed to start test: {e}")
+            import traceback
+            self._log(traceback.format_exc())
+            self._conditioning_failed()
+    
+    def _conditioning_failed(self):
+        """Called when conditioning fails (called on main thread)"""
+        self.start_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+        self.status_label.config(text="Conditioning Failed", foreground="red")
+        
+        messagebox.showerror(
+            "Test Start Failed",
+            "Instrument conditioning failed.\n\n"
+            "Please check:\n"
+            "• Instruments are powered on\n"
+            "• COM ports are correct\n"
+            "• Cables are connected\n"
+            "• No other software is using the ports\n\n"
+            "Check the Test Logs for details."
+        )
 
     def _stop(self):
         """Stop the test and safely shut down equipment"""
@@ -2582,7 +2839,7 @@ class App(tk.Tk):
     def _finalize_stop(self):
         """Finalize the stop process and reset UI"""
         self. start_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk. DISABLED)
         self.status_label.config(text="Idle - Safe State", foreground="blue")
         self._log("═══ STOP COMPLETE ═══")
         self._log("✓ Equipment in safe state:")
@@ -2591,7 +2848,6 @@ class App(tk.Tk):
         self._log("  • Mode: LOCAL")
         self._log("✓ Ready to start new test.")
         
-        # Show completion message
         messagebox.showinfo(
             "Safe Shutdown Complete", 
             "Equipment has been safely shut down:\n\n"
