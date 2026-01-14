@@ -323,7 +323,7 @@ class ProfileRowWidget:
 
 # --- Worker thread for master-slave test ---
 class MasterSlaveWorkerThread(threading.Thread):
-    def __init__(self, settings:   Settings, csv_folder: Optional[str], rotate_hours: float,
+    def __init__(self, settings:  Settings, csv_folder: Optional[str], rotate_hours: float,
                  record_interval_s: int, log_queue: queue.Queue, plot_queue: Optional[queue.Queue] = None):
         super().__init__(daemon=True)
         self.settings = settings
@@ -332,14 +332,19 @@ class MasterSlaveWorkerThread(threading.Thread):
         self.record_interval_s = max(1, int(record_interval_s))
         self.log_queue = log_queue
         self.plot_queue = plot_queue
-        self._stop_event = threading.Event()  # CHANGED from _stop to _stop_event
-        self. master = InstrumentController(settings. master_port, settings.baud_rate, self._log, "MASTER")
+        self._stop_event = threading.Event()
+        self.master = InstrumentController(settings. master_port, settings.baud_rate, self._log, "MASTER")
         self.slave = InstrumentController(settings.slave_port, settings.baud_rate, self._log, "SLAVE")
         self.csv_file = None
-        self.csv_writer = None
+        self. csv_writer = None
         self.current_csv_start = None
         self.test_start_time = None
         self. csv_lock = threading.Lock()
+        
+        # NEW: Log file handling
+        self.log_file = None
+        self.log_writer = None
+        self.log_lock = threading.Lock()
         
         # Energy/Capacity tracking
         self.cumulative_energy_wh = 0.0
@@ -354,6 +359,72 @@ class MasterSlaveWorkerThread(threading.Thread):
         self. dq_dv = 0.0
         self.dq_dv_voltage = 0.0
         self.dq_dv_valid = False
+
+    def _open_log_file(self):
+        """Open a new log CSV file with timestamp-based naming"""
+        if not self.csv_folder:
+            return
+        
+        try:
+            os.makedirs(self.csv_folder, exist_ok=True)
+            start = self._now_central()
+            fname = start.strftime("master_slave_load_%Y%m%d_%H%M%S_central_test_logs.csv")
+            path = os.path.join(self.csv_folder, fname)
+            
+            f = open(path, "w", newline="", encoding="utf-8")
+            writer = csv.writer(f)
+            writer.writerow(["timestamp_central", "relative_seconds", "log_level", "message"])
+            
+            self.log_file = f
+            self. log_writer = writer
+            self._log(f"Opened log file: {path}")
+        except Exception as e:
+            print(f"[ERROR] Could not open log file: {e}")
+    
+    def _write_log_entry(self, message: str):
+        """Write a log entry to the log CSV file"""
+        if not self. log_writer:
+            return
+        
+        try:
+            ts = self._format_ts(self._now_central())
+            
+            # Calculate relative time if test has started
+            if self.test_start_time: 
+                rel = int((self._now_central() - self.test_start_time).total_seconds())
+            else:
+                rel = 0
+            
+            # Determine log level from message
+            log_level = "INFO"
+            if "[ERROR]" in message or "[EXCEPTION]" in message:
+                log_level = "ERROR"
+            elif "[ALERT]" in message or "[WARNING]" in message or "⚠" in message:
+                log_level = "WARNING"
+            elif "[CUTOFF]" in message: 
+                log_level = "CUTOFF"
+            elif "===" in message or "═══" in message:
+                log_level = "MILESTONE"
+            elif "[DEBUG]" in message:
+                log_level = "DEBUG"
+            
+            with self.log_lock:
+                self.log_writer.writerow([ts, rel, log_level, message])
+                self. log_file.flush()
+        except Exception as e:
+            print(f"[ERROR] Writing log entry: {e}")
+    
+    def _close_log_file(self):
+        """Close the log file"""
+        if self.log_file:
+            try:
+                with self.log_lock:
+                    self.log_file.close()
+                    self. log_file = None
+                    self.log_writer = None
+                self._log("Log file closed")
+            except Exception as e:
+                print(f"[ERROR] Closing log file: {e}")
 
     def request_stop(self):
         """Request the worker thread to stop"""
@@ -372,8 +443,15 @@ class MasterSlaveWorkerThread(threading.Thread):
             return dt.strftime("%Y-%m-%d %H:%M:%S")
 
     def _log(self, msg: str):
-        ts = self._format_ts(self._now_central())
-        self.log_queue.put(f"{ts} {msg}")
+        """Log message to both queue and CSV file"""
+        try:
+            self.log_queue.put_nowait(msg)
+        except Exception: 
+            pass
+        
+        # Also write to log file
+        if self.log_writer:
+            self._write_log_entry(msg)
 
     def _open_new_csv(self):
         if not self.csv_folder:
@@ -424,17 +502,19 @@ class MasterSlaveWorkerThread(threading.Thread):
         self.current_csv_start = None
 
     def _maybe_rotate_csv(self):
-        if not self.csv_folder:
+        """Check if CSV needs rotation and open new file if needed"""
+        if not self.current_csv_start or not self.csv_file:
             return
-        if self.csv_file is None:
-            self._open_new_csv()
-            return
-        if self.rotate_hours <= 0:
-            return
-        elapsed = self._now_central() - self.current_csv_start
-        if elapsed >= timedelta(hours=self.rotate_hours):
+        
+        elapsed = (self._now_central() - self.current_csv_start).total_seconds() / 3600.0
+        if elapsed >= self.rotate_hours:
+            self._log(f"Rotating CSV after {elapsed:.2f} hours")
             self._close_csv()
             self._open_new_csv()
+            
+            # NEW: Also rotate log file
+            self._close_log_file()
+            self._open_log_file()
 
     def _write_csv_row(self, step_idx:  int, total_set_power:  float, mv, mi, mp, sv, si, sp, 
                        power_imb, current_imb, voltage_imb, total_power, total_current, avg_voltage,
@@ -614,12 +694,15 @@ class MasterSlaveWorkerThread(threading.Thread):
         try:
             self._log("=== Master-Slave Worker Thread Starting ===")
             
+            # Open log file
+            self._open_log_file()
+            
             # Open both connections
             try:
                 self.master.open(self.settings.timeout)
                 self.slave.open(self.settings.timeout)
             except Exception as e:
-                self._log(f"[ERROR] Opening instruments:  {e}")
+                self._log(f"[ERROR] Opening instruments: {e}")
                 return
 
             # Get IDs
@@ -1031,16 +1114,15 @@ class MasterSlaveWorkerThread(threading.Thread):
             self._safe_shutdown("Mission profile completed successfully")
 
         except Exception as exc:
-            self._log(f"[EXCEPTION] Worker:   {exc}")
+            self._log(f"[EXCEPTION] Worker:  {exc}")
             self._log(traceback.format_exc())
-            # Exception occurred - safe shutdown
-            self._safe_shutdown(f"Exception occurred:  {exc}")
+            self._safe_shutdown(f"Exception occurred: {exc}")
         finally:
             # Always ensure safe shutdown happened
             try:
                 # Double-check everything is off and local
                 for controller in [self.master, self. slave]:
-                    try: 
+                    try:
                         controller.set_power(0.0)
                         controller.load_off()
                         controller.input_off()
@@ -1054,7 +1136,13 @@ class MasterSlaveWorkerThread(threading.Thread):
             # Close CSV
             try:
                 self._close_csv()
-            except Exception:  
+            except Exception:
+                pass
+            
+            # NEW: Close log file
+            try:
+                self._close_log_file()
+            except Exception: 
                 pass
             
             # Close serial connections
@@ -1320,12 +1408,46 @@ class App(tk.Tk):
         self.stop_btn.pack(pady=4)
         self.status_label = ttk.Label(control_fr, text="Idle", foreground="blue")
         self.status_label.pack(pady=6)
+
+        # === Test Logs Section (renamed from Status) ===
+        log_frame = ttk.LabelFrame(top_frame, text="Test Logs", padding=(10, 10))
+        log_frame.pack(side=tk. BOTTOM, fill=tk. BOTH, expand=True, padx=10, pady=(5, 10))
+
+        # Status indicator at top
+        status_display_frame = ttk.Frame(log_frame)
+        status_display_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 5))
+        
+        ttk.Label(status_display_frame, text="Status:", font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 10))
+        self.status_label = ttk.Label(status_display_frame, text="Idle", font=('Arial', 10, 'bold'), foreground="blue")
+        self.status_label.pack(side=tk.LEFT)
+
+        # Log text area with scrollbar
+        log_scroll_frame = ttk.Frame(log_frame)
+        log_scroll_frame.pack(fill=tk.BOTH, expand=True)
+        
+        log_scrollbar = ttk.Scrollbar(log_scroll_frame)
+        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.log_text = tk.Text(log_scroll_frame, height=15, wrap=tk.WORD, 
+                                yscrollcommand=log_scrollbar.set,
+                                font=('Consolas', 9))
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scrollbar.config(command=self.log_text.yview)
+        
+        # Log controls
+        log_control_frame = ttk.Frame(log_frame)
+        log_control_frame.pack(side=tk. BOTTOM, fill=tk.X, pady=(5, 0))
+        
+        ttk. Button(log_control_frame, text="Clear Logs", 
+                   command=self._clear_log_display).pack(side=tk.LEFT, padx=2)
+        ttk.Label(log_control_frame, text="(Logs are automatically saved to CSV)", 
+                  font=('Arial', 8, 'italic'), foreground='gray').pack(side=tk.LEFT, padx=10)
     
-        # Status (top-right)
-        status_fr = ttk. Labelframe(top_frame, text="Status", padding=(8, 6))
-        status_fr.pack(side=tk.RIGHT, fill=tk.Y)
-        self.status_top_widget = scrolledtext.ScrolledText(status_fr, wrap=tk.WORD, state=tk.DISABLED, width=40, height=12)
-        self.status_top_widget.pack(fill=tk. BOTH, expand=True)
+        # # Status (top-right)
+        # status_fr = ttk. Labelframe(top_frame, text="Test Logs", padding=(8, 6))
+        # status_fr.pack(side=tk.RIGHT, fill=tk.Y)
+        # self.status_top_widget = scrolledtext.ScrolledText(status_fr, wrap=tk.WORD, state=tk.DISABLED, width=40, height=12)
+        # self.status_top_widget.pack(fill=tk. BOTH, expand=True)
     
         # Config note in config tab
         note_fr = ttk.Labelframe(config_tab, text="Configuration Note", padding=(6, 6))
@@ -1344,11 +1466,11 @@ class App(tk.Tk):
         ttk.Spinbox(fs_fr, from_=8, to=48, increment=1, textvariable=self.config_note_fontsize, width=5, command=self._apply_note_font).pack(side=tk.LEFT, padx=6)
         ttk.Button(fs_fr, text="Refresh", command=self._update_config_note).pack(side=tk.LEFT, padx=4)
     
-        # Log area in config tab
-        log_fr = ttk.Labelframe(config_tab, text="Log (Central Time)", padding=(8, 6))
-        log_fr.pack(side=tk. TOP, fill=tk. BOTH, expand=True, padx=8, pady=(6, 8))
-        self.log_widget = scrolledtext.ScrolledText(log_fr, wrap=tk.WORD, state=tk. DISABLED)
-        self.log_widget. pack(fill=tk.BOTH, expand=True)
+        # # Log area in config tab
+        # log_fr = ttk.Labelframe(config_tab, text="Log (Central Time)", padding=(8, 6))
+        # log_fr.pack(side=tk. TOP, fill=tk. BOTH, expand=True, padx=8, pady=(6, 8))
+        # self.log_widget = scrolledtext.ScrolledText(log_fr, wrap=tk.WORD, state=tk. DISABLED)
+        # self.log_widget. pack(fill=tk.BOTH, expand=True)
     
         # === TAB 2: Real-Time Plots ===
         plot_tab = ttk.Frame(main_notebook)
@@ -1463,6 +1585,19 @@ class App(tk.Tk):
         self.ax_power.legend(lines, labels, loc='upper left', fontsize=9, framealpha=0.9)
         
         self.fig.tight_layout()
+        
+        # # After creating all axes, set their z-orders
+        # self.ax_power.set_zorder(4)  # Base axis
+        # self.ax_current. set_zorder(3)
+        # self.ax_voltage.set_zorder(2)
+        # self.ax_energy.set_zorder(1)
+        
+        # # Make backgrounds transparent so lines show through
+        # self.ax_current.patch.set_visible(False)
+        # self.ax_voltage.patch.set_visible(False)
+        # self.ax_energy.patch.set_visible(False)
+        
+        self.fig.tight_layout()
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_main_frame)
         self.canvas.draw()
@@ -1486,14 +1621,14 @@ class App(tk.Tk):
             lambda e: style_canvas.configure(scrollregion=style_canvas.bbox("all"))
         )
         
-        # style_canvas.create_window((0, 0), window=style_scrollable_frame, anchor="nw")
-        # style_canvas.configure(yscrollcommand=style_scrollbar. set)
+        style_canvas.create_window((0, 0), window=style_scrollable_frame, anchor="nw")
+        style_canvas.configure(yscrollcommand=style_scrollbar. set)
         
-        # style_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        # style_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        style_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        style_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # style_fr = ttk. Labelframe(style_scrollable_frame, text="Line Appearance", padding=(10, 10))
-        # style_fr.pack(fill=tk. BOTH, expand=True, padx=5, pady=5)
+        style_fr = ttk. Labelframe(style_scrollable_frame, text="Line Appearance", padding=(10, 10))
+        style_fr.pack(fill=tk. BOTH, expand=True, padx=5, pady=5)
 
         # # [Keep all existing Power, Current, Voltage controls as before]
         # # Power line controls
@@ -1771,6 +1906,11 @@ class App(tk.Tk):
         )
         info_text.config(state=tk. DISABLED)
 
+    def _clear_log_display(self):
+        """Clear the log display (doesn't affect saved log file)"""
+        self.log_text.delete('1.0', tk.END)
+        self._log("Log display cleared (saved logs unaffected)")
+
     def _clear_plots(self):
         """Clear all plot data"""
         self.plot_times.clear()
@@ -1869,20 +2009,23 @@ class App(tk.Tk):
         
     def _toggle_imbalance_controls(self):
         """Enable or disable imbalance control entries based on checkbox"""
-        if self.imbalance_check_enabled_var.get():
-            # Enable all imbalance entries
-            self.imbalance_limit_entry.config(state='normal')
-            self.imbalance_transition_entry.config(state='normal')
-            self.transition_duration_entry.config(state='normal')
-            self.voltage_diff_entry.config(state='normal')
-            self._log("Imbalance monitoring ENABLED")
-        else:
-            # Disable all imbalance entries
-            self.imbalance_limit_entry.config(state='disabled')
-            self.imbalance_transition_entry.config(state='disabled')
-            self.transition_duration_entry.config(state='disabled')
-            self.voltage_diff_entry.config(state='disabled')
-            self._log("⚠ WARNING: Imbalance monitoring DISABLED - system will not shut down on imbalance!")
+        try:
+            if self.imbalance_check_enabled_var.get():
+                # Enable all imbalance entries
+                self.imbalance_limit_entry.config(state='normal')
+                self.imbalance_transition_entry.config(state='normal')
+                self. transition_duration_entry.config(state='normal')
+                self.voltage_diff_entry.config(state='normal')
+                self._log("Imbalance monitoring ENABLED")
+            else:
+                # Disable all imbalance entries
+                self.imbalance_limit_entry.config(state='disabled')
+                self.imbalance_transition_entry.config(state='disabled')
+                self. transition_duration_entry.config(state='disabled')
+                self. voltage_diff_entry.config(state='disabled')
+                self._log("⚠ WARNING: Imbalance monitoring DISABLED - system will not shut down on imbalance!")
+        except Exception as e:
+            print(f"[ERROR] Toggling imbalance controls: {e}")
 
     # Profile row helpers
     def _add_row(self):
@@ -2231,8 +2374,20 @@ class App(tk.Tk):
             return dt.strftime("%Y-%m-%d %H:%M:%S")
 
     def _log(self, msg: str):
-        ts = self._format_ts(self._now_central())
-        self.log_queue.put(f"{ts} {msg}")
+        """Log message to UI (App class version)"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            full_msg = f"{timestamp} {msg}"
+            
+            # Add to UI text widget
+            if hasattr(self, 'log_text'):
+                self.log_text.insert(tk.END, full_msg + "\n")
+                self.log_text. see(tk.END)
+            
+            # Print to console as backup
+            print(full_msg)
+        except Exception as e:
+            print(f"[ERROR] Logging failed: {e}")
 
     def _periodic_log_poll(self):
         try:
@@ -2283,11 +2438,11 @@ class App(tk.Tk):
             self.settings.slave_port = self.slave_port_entry.get().strip() or DEFAULT_SLAVE_PORT
             self.settings. baud_rate = int(self.baud_entry.get().strip())
             self.settings.dry_run = bool(self.dry_var.get())
-            self.settings.cutoff_voltage = float(self. cutoff_entry.get().strip())
+            self.settings.cutoff_voltage = float(self.cutoff_entry.get().strip())
             self.settings.cutoff_safety_enabled = bool(self.cutoff_safety_var.get())
-            self.settings.imbalance_check_enabled = bool(self.imbalance_check_enabled_var. get())  # NEW
-            self.settings. imbalance_limit = float(self.imbalance_limit_var.get()) / 100.0
-            self.settings.imbalance_transition = float(self.imbalance_transition_var.get()) / 100.0
+            self.settings.imbalance_check_enabled = bool(self.imbalance_check_enabled_var.get())
+            self.settings.imbalance_limit = float(self.imbalance_limit_var.get()) / 100.0
+            self. settings.imbalance_transition = float(self.imbalance_transition_var.get()) / 100.0
             self.settings.transition_duration = int(self.transition_duration_var.get())
             self.settings.voltage_diff_limit = float(self.voltage_diff_limit_var.get()) / 100.0
             
@@ -2300,18 +2455,19 @@ class App(tk.Tk):
             self._sync_profile_from_widgets()
             
             # Validate profile
-            if not self. settings.profile:
+            if not self. settings.profile: 
                 raise ValueError("Profile must contain at least one row.")
             
             # Log warning if imbalance check is disabled
-            if not self.settings.imbalance_check_enabled:
-                self._log("⚠⚠⚠ WARNING:  Imbalance monitoring is DISABLED!  ⚠⚠⚠")
+            if not self.settings. imbalance_check_enabled: 
+                self._log("⚠⚠⚠ WARNING: Imbalance monitoring is DISABLED!  ⚠⚠⚠")
             
             self._log("Settings applied.")
             self._update_config_note()
             return True
         except Exception as e:
             messagebox.showerror("Error applying settings", str(e))
+            self._log(f"[ERROR] Applying settings: {e}")
             raise
 
     # Start/Stop
@@ -2883,8 +3039,16 @@ class App(tk.Tk):
         self.config_note_text.configure(state=tk.DISABLED)
 
     def _update_config_note(self):
-        text = self._get_config_note_text()
-        self._set_config_note_text(text)
+        """Update configuration note display"""
+        try:
+            note_text = self._get_config_note_text()
+            if hasattr(self, 'config_note_text'):
+                self.config_note_text.config(state=tk.NORMAL)
+                self.config_note_text.delete('1.0', tk.END)
+                self.config_note_text.insert('1.0', note_text)
+                self.config_note_text.config(state=tk. DISABLED)
+        except Exception as e:
+            self._log(f"[ERROR] Updating config note: {e}")
 
     def _apply_note_font(self):
         sz = int(self.config_note_fontsize. get())
