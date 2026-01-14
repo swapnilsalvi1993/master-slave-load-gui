@@ -782,7 +782,7 @@ class MasterSlaveWorkerThread(threading.Thread):
                             # Check imbalances (power)
                             if mp is not None and sp is not None and mp > 0 and sp > 0:
                                 if power_imb > current_imbalance_limit * 100:
-                                    reason = f"Power imbalance >{current_imbalance_limit*100}%:  M={mp}W S={sp}W ({power_imb:. 1f}%)"
+                                    reason = f"Power imbalance >{current_imbalance_limit*100}%:  M={mp}W S={sp}W ({power_imb:.1f}%)"
                                     self._log(f"[ALERT] {reason}")
                                     self._safe_shutdown(reason)
                                     self.request_stop()
@@ -1151,12 +1151,12 @@ class App(tk.Tk):
         self.dqdv_marker_var = tk.StringVar(value="circle")  
 
         self.power_color_var = tk.StringVar(value="blue")
-        self.power_width_var = tk.DoubleVar(value=2.0)
+        self.power_width_var = tk.DoubleVar(value=3.0)
         self.power_style_var = tk.StringVar(value="solid")
         
         self.current_color_var = tk.StringVar(value="red")
         self.current_width_var = tk.DoubleVar(value=2.0)
-        self.current_style_var = tk.StringVar(value="solid")
+        self.current_style_var = tk.StringVar(value="dashed")
         
         self.voltage_color_var = tk.StringVar(value="green")
         self.voltage_width_var = tk.DoubleVar(value=2.0)
@@ -1297,7 +1297,7 @@ class App(tk.Tk):
         toolbar.pack(side=tk.TOP, fill=tk.X)
         ttk.Button(toolbar, text="Add Row", command=self._add_row).pack(side=tk.LEFT, padx=4)
         ttk.Button(toolbar, text="Clear All", command=self._clear_all_rows).pack(side=tk.LEFT, padx=4)
-    
+
         canvas = tk.Canvas(profile_fr, height=360)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar = ttk. Scrollbar(profile_fr, orient="vertical", command=canvas.yview)
@@ -1358,15 +1358,17 @@ class App(tk.Tk):
         plot_control_frame = ttk.Frame(plot_tab)
         plot_control_frame.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
         
-        ttk.Label(plot_control_frame, text="Master-Slave Combined Real-Time Monitoring", 
+        ttk. Label(plot_control_frame, text="Master-Slave Combined Real-Time Monitoring", 
                   font=('Arial', 14, 'bold')).pack(side=tk.LEFT, padx=10)
         
         ttk.Button(plot_control_frame, text="Clear Plot", 
                    command=self._clear_plots).pack(side=tk.RIGHT, padx=5)
         ttk.Button(plot_control_frame, text="Export Plot Image", 
                    command=self._save_plot_screenshot).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(plot_control_frame, text="Export Plot Data ()", 
+        ttk.Button(plot_control_frame, text="Export Plot Data (CSV)", 
                    command=self._export_plot_data).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(plot_control_frame, text="Debug Plot", 
+                   command=self._debug_plot_data).pack(side=tk.RIGHT, padx=5)
         
         # Main plot area
         plot_main_frame = ttk.Frame(plot_tab)
@@ -1385,7 +1387,18 @@ class App(tk.Tk):
         self.ax_voltage.spines['right'].set_position(('outward', 60))
         self.ax_energy.spines['right'].set_position(('outward', 120))
         
-        # **NEW:  Disable offset/scientific notation on all axes**
+        # Set axis z-orders and make backgrounds transparent
+        self.ax_power.set_zorder(1)
+        self.ax_current.set_zorder(2)
+        self.ax_voltage.set_zorder(3)
+        self.ax_energy. set_zorder(4)
+        
+        # Make all backgrounds transparent except base
+        self.ax_current.patch.set_visible(False)
+        self.ax_voltage.patch.set_visible(False)
+        self.ax_energy.patch.set_visible(False)
+        
+        # Disable offset/scientific notation on all axes
         self.ax_power.ticklabel_format(style='plain', axis='y', useOffset=False)
         self.ax_current.ticklabel_format(style='plain', axis='y', useOffset=False)
         self.ax_voltage.ticklabel_format(style='plain', axis='y', useOffset=False)
@@ -1398,8 +1411,8 @@ class App(tk.Tk):
         self.ax_current.set_ylabel("Total Current (A)", fontsize=11, fontweight='bold', 
                                     color=self.current_color_var.get())
         self.ax_voltage.set_ylabel("Avg Voltage (V)", fontsize=11, fontweight='bold', 
-                                    color=self. voltage_color_var.get())
-        self.ax_energy. set_ylabel("Energy (Wh)", fontsize=11, fontweight='bold',
+                                    color=self.voltage_color_var. get())
+        self.ax_energy.set_ylabel("Energy (Wh)", fontsize=11, fontweight='bold',
                                    color=self.energy_color_var.get())
         
         # Tick colors
@@ -1411,20 +1424,19 @@ class App(tk.Tk):
         # Grid (only on primary axis)
         self.ax_power.grid(True, alpha=0.3, linestyle='--')
         
-        # **NEW: Set z-order to ensure power line is visible**
-        # Create line objects with proper z-order
-        (self.line_power,) = self.ax_power.plot([], [], 
-                                                 color=self.power_color_var.get(), 
-                                                 linestyle=LINE_STYLES[self.power_style_var.get()], 
+        # Create line objects - ALL with distinct colors and z-orders
+        (self. line_power,) = self.ax_power.plot([], [], 
+                                                 color=self.power_color_var. get(), 
+                                                 linestyle=LINE_STYLES[self.power_style_var. get()], 
                                                  linewidth=self.power_width_var.get(),
                                                  marker='o', markersize=3,
                                                  label="Total Power (W)",
-                                                 zorder=10)  # Higher z-order = drawn on top
+                                                 zorder=10)
         
-        (self. line_current,) = self.ax_current.plot([], [], 
+        (self.line_current,) = self.ax_current.plot([], [], 
                                                      color=self.current_color_var.get(), 
                                                      linestyle=LINE_STYLES[self.current_style_var.get()], 
-                                                     linewidth=self. current_width_var.get(),
+                                                     linewidth=self.current_width_var.get(),
                                                      marker='s', markersize=3,
                                                      label="Total Current (A)",
                                                      zorder=9)
@@ -1446,7 +1458,7 @@ class App(tk.Tk):
                                                    zorder=7)
         
         # Combined legend
-        lines = [self.line_power, self. line_current, self.line_voltage, self.line_energy]
+        lines = [self.line_power, self.line_current, self. line_voltage, self.line_energy]
         labels = [l.get_label() for l in lines]
         self.ax_power.legend(lines, labels, loc='upper left', fontsize=9, framealpha=0.9)
         
@@ -1810,7 +1822,51 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Export Error", str(e))
             self._log(f"[ERROR] Export failed: {e}")
-
+            
+    def _debug_plot_data(self):
+        """Debug method to check plot data"""
+        self._log("=== PLOT DEBUG INFO ===")
+        self._log(f"Data points: {len(self.plot_times)}")
+        
+        if self.plot_times:
+            self._log(f"Time range: {min(self.plot_times)} to {max(self.plot_times)} seconds")
+        
+        if self.plot_total_power:
+            power_vals = [p for p in self. plot_total_power if p and not (p != p)]
+            if power_vals:
+                self._log(f"Power:  min={min(power_vals):.2f}W, max={max(power_vals):.2f}W, count={len(power_vals)}")
+            else:
+                self._log("Power:  NO VALID VALUES")
+        else:
+            self._log("Power:  EMPTY ARRAY")
+            
+        if self.plot_total_current:
+            current_vals = [c for c in self. plot_total_current if c and not (c != c)]
+            if current_vals:
+                self._log(f"Current: min={min(current_vals):.2f}A, max={max(current_vals):.2f}A, count={len(current_vals)}")
+        
+        if self.plot_avg_voltage:
+            voltage_vals = [v for v in self.plot_avg_voltage if v and not (v != v)]
+            if voltage_vals:
+                self._log(f"Voltage: min={min(voltage_vals):.2f}V, max={max(voltage_vals):.2f}V, count={len(voltage_vals)}")
+        
+        if self.plot_cumulative_energy:
+            energy_vals = [e for e in self.plot_cumulative_energy if e is not None]
+            if energy_vals:
+                self._log(f"Energy: min={min(energy_vals):.4f}Wh, max={max(energy_vals):.4f}Wh, count={len(energy_vals)}")
+        
+        # Check line visibility
+        self._log(f"Power line visible: {self.line_power.get_visible()}")
+        self._log(f"Power line color: {self.line_power. get_color()}")
+        self._log(f"Power line width: {self.line_power. get_linewidth()}")
+        self._log(f"Power line zorder: {self.line_power.get_zorder()}")
+        
+        # Check axis limits
+        self._log(f"Power axis Y limits: {self.ax_power.get_ylim()}")
+        self._log(f"Power axis X limits: {self.ax_power.get_xlim()}")
+        
+        self._log("=== END DEBUG ===")
+        
     def _toggle_imbalance_controls(self):
         """Enable or disable imbalance control entries based on checkbox"""
         if self.imbalance_check_enabled_var.get():
@@ -2421,14 +2477,13 @@ class App(tk.Tk):
     def _periodic_plot_poll(self):
         """Poll plot queue and update with combined totals"""
         updated = False
+        
         try:
-            while True:
-                # Unpack all 13 values from the queue
-                queue_data = self.plot_queue.get_nowait()
+            while True: 
+                queue_data = self. plot_queue.get_nowait()
                 
-                # Check length to debug
                 if len(queue_data) != 13:
-                    self._log(f"[ERROR] Plot queue data length mismatch: expected 13, got {len(queue_data)}")
+                    self._log(f"[ERROR] Plot queue data length:  {len(queue_data)} (expected 13)")
                     continue
                 
                 rel, step_idx, mv, mi, mp, sv, si, sp, energy_wh, capacity_ah, dq_dv, dq_dv_voltage, dq_dv_valid = queue_data
@@ -2440,52 +2495,51 @@ class App(tk.Tk):
                 
                 if mp is not None and sp is not None:
                     total_power = mp + sp
-                elif mp is not None:
+                elif mp is not None: 
                     total_power = mp
-                elif sp is not None:
+                elif sp is not None: 
                     total_power = sp
                 
-                if mi is not None and si is not None:
+                if mi is not None and si is not None: 
                     total_current = mi + si
                 elif mi is not None:
                     total_current = mi
                 elif si is not None:
                     total_current = si
                 
-                if mv is not None and sv is not None:
+                if mv is not None and sv is not None: 
                     avg_voltage = (mv + sv) / 2.0
                 elif mv is not None:
                     avg_voltage = mv
                 elif sv is not None:  
                     avg_voltage = sv
                 
-                self.plot_times.append(rel)
-                self.plot_total_power. append(total_power if total_power > 0 else float('nan'))
-                self.plot_total_current.append(total_current if total_current > 0 else float('nan'))
-                self.plot_avg_voltage.append(avg_voltage if avg_voltage > 0 else float('nan'))
-                self.plot_cumulative_energy. append(energy_wh if energy_wh is not None else 0.0)
-                self. plot_cumulative_capacity.append(capacity_ah if capacity_ah is not None else 0.0)
+                self. plot_times.append(rel)
+                self.plot_total_power.append(total_power)
+                self.plot_total_current.append(total_current)
+                self.plot_avg_voltage.append(avg_voltage)
+                self.plot_cumulative_energy.append(energy_wh if energy_wh is not None else 0.0)
+                self.plot_cumulative_capacity.append(capacity_ah if capacity_ah is not None else 0.0)
                 
                 # Store dQ/dV data if valid
-                if dq_dv_valid and abs(dq_dv) < 1000:  # Filter out extreme values
+                if dq_dv_valid and abs(dq_dv) < 1000:
                     self.plot_dqdv_voltage.append(dq_dv_voltage)
                     self.plot_dqdv_values.append(dq_dv)
                 
                 updated = True
+                
         except queue.Empty:
             pass
-        except Exception as e:
-            self._log(f"[ERROR] Plot poll exception: {e}")
-            import traceback
-            self._log(traceback.format_exc())
+        except Exception as e:  
+            self._log(f"[ERROR] Plot poll exception:  {e}")
 
         if updated:
-            try:
+            try:  
                 self._update_plot_lines()
                 if hasattr(self, '_update_dqdv_plot'):
                     self._update_dqdv_plot()
             except Exception as e:
-                self._log(f"[ERROR] Plot update exception: {e}")
+                self._log(f"[ERROR] Plot update exception:  {e}")
         
         self.after(500, self._periodic_plot_poll)
 
@@ -2494,40 +2548,44 @@ class App(tk.Tk):
         if not self.plot_dqdv_voltage:
             return
         
-        # Update line data
-        self.line_dqdv.set_data(self.plot_dqdv_voltage, self.plot_dqdv_values)
-        
-        # Update axis limits
-        try:
-            self.ax_dqdv.relim()
-            self.ax_dqdv.autoscale_view(True, True, True)
+        try: 
+            # Update line data
+            self.line_dqdv. set_data(self.plot_dqdv_voltage, self. plot_dqdv_values)
             
-            # **NEW:  Re-apply plain formatting**
-            self.ax_dqdv. ticklabel_format(style='plain', axis='both', useOffset=False)
-        except Exception: 
-            pass
-        
-        # Update statistics
-        if hasattr(self, 'dqdv_points_label'):
-            self.dqdv_points_label.config(text=f"{len(self.plot_dqdv_values)}")
-            
-            if self.plot_dqdv_values:
-                current_dqdv = self.plot_dqdv_values[-1]
-                current_voltage = self.plot_dqdv_voltage[-1]
-                max_dqdv = max(self.plot_dqdv_values)
-                min_dqdv = min(self.plot_dqdv_values)
+            # Update axis limits
+            try:
+                self.ax_dqdv.relim()
+                self.ax_dqdv. autoscale_view(True, True, True)
                 
-                self.dqdv_current_label.config(text=f"{current_dqdv:.4f} Ah/V")
-                self.dqdv_voltage_label.config(text=f"{current_voltage:.3f} V")
-                self. dqdv_max_label. config(text=f"{max_dqdv:.4f} Ah/V")
-                self. dqdv_min_label. config(text=f"{min_dqdv:.4f} Ah/V")
-        
-        self.fig_dqdv.tight_layout()
-        
-        if redraw:
-            self.canvas_dqdv.draw_idle()
-        else:
-            self.canvas_dqdv.draw()
+                # Re-apply plain formatting
+                self.ax_dqdv.ticklabel_format(style='plain', axis='both', useOffset=False)
+            except Exception:
+                pass
+            
+            # Update statistics
+            if hasattr(self, 'dqdv_points_label'):
+                self. dqdv_points_label.config(text=str(len(self.plot_dqdv_values)))
+                
+                if self.plot_dqdv_values:
+                    current_dqdv = self.plot_dqdv_values[-1]
+                    current_voltage = self.plot_dqdv_voltage[-1]
+                    max_dqdv = max(self.plot_dqdv_values)
+                    min_dqdv = min(self.plot_dqdv_values)
+                    
+                    self.dqdv_current_label.config(text=f"{current_dqdv:.4f} Ah/V")
+                    self.dqdv_voltage_label.config(text=f"{current_voltage:.3f} V")
+                    self.dqdv_max_label.config(text=f"{max_dqdv:.4f} Ah/V")
+                    self.dqdv_min_label.config(text=f"{min_dqdv:.4f} Ah/V")
+            
+            self.fig_dqdv.tight_layout()
+            
+            if redraw: 
+                self.canvas_dqdv.draw_idle()
+            else:
+                self. canvas_dqdv.draw()
+                
+        except Exception as e:
+            self._log(f"[ERROR] in _update_dqdv_plot: {e}")
     
     def _apply_dqdv_styles(self):
         """Apply styles to dQ/dV plot"""
@@ -2614,74 +2672,113 @@ class App(tk.Tk):
             messagebox.showerror("Export Error", str(e))
             self._log(f"[ERROR] dQ/dV export failed: {e}")
 
-    def _update_plot_lines(self, redraw:  bool = False):
+    def _update_plot_lines(self, redraw: bool = False):
         """Update plot lines with combined data"""
         if not self.plot_times:
             return
         
-        x = self.plot_times
-        
-        # Update line data
-        self.line_power. set_data(x, self. plot_total_power)
-        self.line_current.set_data(x, self.plot_total_current)
-        self.line_voltage.set_data(x, self.plot_avg_voltage)
-        self.line_energy.set_data(x, self.plot_cumulative_energy)
-
-        x_max = max(x) if x else 10
-        
-        # Update x-axis limits
-        self.ax_power. set_xlim(0, max(10, x_max))
-        
-        # Autoscale y-axes
         try:
-            self.ax_power.relim()
-            self.ax_power.autoscale_view(True, True, True)
-            self.ax_current.relim()
-            self.ax_current.autoscale_view(True, False, True)
-            self.ax_voltage.relim()
-            self.ax_voltage.autoscale_view(True, False, True)
-            self.ax_energy.relim()
-            self.ax_energy.autoscale_view(True, False, True)
+            x = self.plot_times
             
-            # **NEW: Re-apply plain formatting after autoscale**
-            self. ax_power.ticklabel_format(style='plain', axis='y', useOffset=False)
-            self.ax_current.ticklabel_format(style='plain', axis='y', useOffset=False)
-            self.ax_voltage.ticklabel_format(style='plain', axis='y', useOffset=False)
-            self.ax_energy.ticklabel_format(style='plain', axis='y', useOffset=False)
-        except Exception as e:
-            self._log(f"[DEBUG] Autoscale error: {e}")
+            # Update ALL line data
+            self.line_power. set_data(x, self. plot_total_power)
+            self.line_current.set_data(x, self. plot_total_current)
+            self.line_voltage.set_data(x, self.plot_avg_voltage)
+            self.line_energy.set_data(x, self.plot_cumulative_energy)
+            
+            # Ensure all lines are visible
+            self.line_power.set_visible(True)
+            self.line_current.set_visible(True)
+            self.line_voltage.set_visible(True)
+            self.line_energy.set_visible(True)
+            
+            x_max = max(x) if x else 10
+            
+            # Update x-axis limits
+            self.ax_power.set_xlim(0, max(10, x_max))
+            
+            # Autoscale ALL y-axes with data-driven limits
+            try:
+                # Power axis
+                if self.plot_total_power:
+                    power_vals = [p for p in self. plot_total_power if p and not (p != p) and p >= 0]
+                    if power_vals:
+                        p_min = min(power_vals)
+                        p_max = max(power_vals)
+                        margin = (p_max - p_min) * 0.1 if p_max > p_min else max(10, p_max * 0.1)
+                        self.ax_power.set_ylim(max(0, p_min - margin), p_max + margin)
+                
+                # Current axis
+                if self.plot_total_current:
+                    current_vals = [c for c in self.plot_total_current if c and not (c != c) and c >= 0]
+                    if current_vals:
+                        c_min = min(current_vals)
+                        c_max = max(current_vals)
+                        margin = (c_max - c_min) * 0.1 if c_max > c_min else max(1, c_max * 0.1)
+                        self.ax_current.set_ylim(max(0, c_min - margin), c_max + margin)
+                
+                # Voltage axis
+                if self.plot_avg_voltage:
+                    voltage_vals = [v for v in self.plot_avg_voltage if v and not (v != v) and v >= 0]
+                    if voltage_vals:
+                        v_min = min(voltage_vals)
+                        v_max = max(voltage_vals)
+                        margin = (v_max - v_min) * 0.1 if v_max > v_min else max(1, v_max * 0.1)
+                        self.ax_voltage.set_ylim(max(0, v_min - margin), v_max + margin)
+                
+                # Energy axis
+                if self.plot_cumulative_energy:
+                    energy_vals = [e for e in self.plot_cumulative_energy if e is not None and e >= 0]
+                    if energy_vals: 
+                        e_min = min(energy_vals)
+                        e_max = max(energy_vals)
+                        margin = (e_max - e_min) * 0.1 if e_max > e_min else max(0.1, e_max * 0.1)
+                        self. ax_energy.set_ylim(max(0, e_min - margin), e_max + margin)
+                
+                # Re-apply plain formatting after setting limits
+                self.ax_power.ticklabel_format(style='plain', axis='y', useOffset=False)
+                self. ax_current.ticklabel_format(style='plain', axis='y', useOffset=False)
+                self.ax_voltage.ticklabel_format(style='plain', axis='y', useOffset=False)
+                self.ax_energy.ticklabel_format(style='plain', axis='y', useOffset=False)
+            except Exception as e:
+                self._log(f"[DEBUG] Axis scaling error: {e}")
 
-        # Update statistics
-        if hasattr(self, 'stats_points_label'):
-            self.stats_points_label.config(text=f"{len(x)}")
-            self.stats_time_label.config(text=f"{x_max:.1f} s" if x else "0 s")
-            
-            # Calculate averages (excluding NaN values)
-            valid_power = [p for p in self. plot_total_power if not (p != p)]
-            valid_current = [c for c in self.plot_total_current if not (c != c)]
-            valid_voltage = [v for v in self.plot_avg_voltage if not (v != v)]
-            
-            avg_power = sum(valid_power) / len(valid_power) if valid_power else 0.0
-            avg_current = sum(valid_current) / len(valid_current) if valid_current else 0.0
-            avg_voltage = sum(valid_voltage) / len(valid_voltage) if valid_voltage else 0.0
-            
-            self.stats_avg_power_label.config(text=f"{avg_power:.2f} W")
-            self.stats_avg_current_label. config(text=f"{avg_current:.2f} A")
-            self.stats_avg_voltage_label.config(text=f"{avg_voltage:.2f} V")
-            
-            # Update energy statistics (show latest values)
-            if self.plot_cumulative_energy:
-                latest_energy = self.plot_cumulative_energy[-1]
-                latest_capacity = self.plot_cumulative_capacity[-1]
-                self. stats_energy_label.config(text=f"{latest_energy:. 4f} Wh")
-                self.stats_capacity_label. config(text=f"{latest_capacity:.4f} Ah")
+            # Update statistics
+            if hasattr(self, 'stats_points_label'):
+                self.stats_points_label.config(text=str(len(x)))
+                self.stats_time_label. config(text=f"{x_max:.1f} s" if x else "0 s")
+                
+                # Calculate averages
+                valid_power = [p for p in self. plot_total_power if p and not (p != p)]
+                valid_current = [c for c in self.plot_total_current if c and not (c != c)]
+                valid_voltage = [v for v in self. plot_avg_voltage if v and not (v != v)]
+                
+                avg_power = sum(valid_power) / len(valid_power) if valid_power else 0.0
+                avg_current = sum(valid_current) / len(valid_current) if valid_current else 0.0
+                avg_voltage = sum(valid_voltage) / len(valid_voltage) if valid_voltage else 0.0
+                
+                self.stats_avg_power_label.config(text=f"{avg_power:.2f} W")
+                self. stats_avg_current_label. config(text=f"{avg_current:.2f} A")
+                self.stats_avg_voltage_label.config(text=f"{avg_voltage:.2f} V")
+                
+                # Update energy statistics
+                if self.plot_cumulative_energy:
+                    latest_energy = self.plot_cumulative_energy[-1]
+                    latest_capacity = self.plot_cumulative_capacity[-1]
+                    self. stats_energy_label.config(text=f"{latest_energy:.4f} Wh")
+                    self. stats_capacity_label.config(text=f"{latest_capacity:.4f} Ah")
 
-        self.fig.tight_layout()
+            self.fig.tight_layout()
 
-        if redraw:
-            self.canvas.draw_idle()
-        else:
-            self.canvas. draw()
+            if redraw:
+                self.canvas.draw_idle()
+            else:
+                self.canvas. draw()
+                
+        except Exception as e: 
+            self._log(f"[ERROR] in _update_plot_lines: {e}")
+            import traceback
+            self._log(traceback.format_exc())
 
     # Style application
     def _choose_color(self, color_var):
