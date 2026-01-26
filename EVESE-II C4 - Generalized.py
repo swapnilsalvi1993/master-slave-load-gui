@@ -169,20 +169,26 @@ def select_channels_dialog(available_channels, dialog_title, instruction_text):
     
     return selected_channels
 
-def create_qgen_analysis(csv_file, main_data):
+def create_qgen_analysis(csv_file, main_data, output_directory):
     """
     Creates or updates the 'Q_gen Analysis' sheet in the CSV file.
     Copies time columns and calculates T_Cell_Avg and T_Gas_Avg from selected channels.
     Also calculates temperature derivatives dT/dt_Cell and dT/dt_Gas.
     Calculates heat generation rate Q_dot_cell and cumulative energy E_cell.
+    Calculates gas heat generation Q_dot_gas and cumulative energy E_gas.
     Creates a summary report sheet.
-    Saves everything back to the original file location as Excel format.
+    Saves to the specified output directory as Excel format.
     """
     print(f"\nCreating Q_gen Analysis for: {csv_file}")
     
     # Cell properties
     m_cell = 0.9  # kg
     Cp_cell = 1100  # J/(kg·K)
+    
+    # Gas properties
+    R = 8.314463  # J/(mol·K)
+    V = 0.025  # m^3
+    Cp_gas = 34  # J/(mol·K)
     
     try:
         # Check if required columns exist
@@ -224,6 +230,12 @@ def create_qgen_analysis(csv_file, main_data):
         
         if not selected_gas_tcs:
             print("!!WARNING!! - No channels selected for T_Gas_Avg. Skipping analysis.")
+            return
+        
+        # Check if pressure column exists
+        pressure_column = '/RTAC Data/1000 Pressure'
+        if pressure_column not in main_data.columns:
+            print(f"!!ERROR!! - Pressure column '{pressure_column}' not found. Cannot calculate gas properties.")
             return
         
         # Create Q_gen Analysis DataFrame
@@ -357,6 +369,36 @@ def create_qgen_analysis(csv_file, main_data):
         print(f"  - Cell specific heat (Cp_cell): {Cp_cell} J/(kg·K)")
         print(f"  - Q_dot_cell range: {qgen_df['Q_dot_cell'].min():.3f} to {qgen_df['Q_dot_cell'].max():.3f} W")
         
+        # Calculate gas heat generation rate Q_dot_gas (W)
+        # First, get pressure from main data and convert from PSIG to Pascal
+        pressure_psig = main_data[pressure_column].values
+        # Convert PSIG to Pascal: 1 psi = 6894.76 Pa, add atmospheric pressure (14.7 psi)
+        pressure_pascal = (pressure_psig + 14.7) * 6894.76
+        
+        # Convert T_Gas_Avg from Celsius to Kelvin
+        temp_gas_kelvin = temp_gas + 273.15
+        
+        # Calculate number of moles: n = (P*V)/(R*T)
+        n_moles = []
+        for i in range(len(qgen_df)):
+            if temp_gas_kelvin[i] > 0:
+                n = (pressure_pascal[i] * V) / (R * temp_gas_kelvin[i])
+            else:
+                n = 0.0
+            n_moles.append(n)
+        
+        n_moles = pd.Series(n_moles)
+        
+        # Calculate Q_dot_gas = n × Cp_gas × dT/dt_Gas
+        qgen_df['Q_dot_gas'] = (n_moles * Cp_gas * qgen_df['dT/dt_Gas']).round(3)
+        
+        print(f"\n✓ Gas heat generation rate calculated:")
+        print(f"  - Enclosure volume (V): {V} m³")
+        print(f"  - Gas constant (R): {R} J/(mol·K)")
+        print(f"  - Gas specific heat (Cp_gas): {Cp_gas} J/(mol·K)")
+        print(f"  - Number of moles range: {n_moles.min():.3f} to {n_moles.max():.3f} mol")
+        print(f"  - Q_dot_gas range: {qgen_df['Q_dot_gas'].min():.3f} to {qgen_df['Q_dot_gas'].max():.3f} W")
+        
         # Calculate cumulative energy E_cell (J)
         # E_cell = ∫ Q_dot_cell dt = Σ (Q_dot_cell × Δt)
         E_cell = []
@@ -380,8 +422,53 @@ def create_qgen_analysis(csv_file, main_data):
         # Convert cumulative energy to kJ for reporting
         total_energy_kJ = cumulative_energy / 1000.0
         
-        print(f"\n✓ Cumulative energy calculated:")
-        print(f"  - Total energy released: {total_energy_kJ:.3f} kJ ({cumulative_energy:.3f} J)")
+        print(f"\n✓ Cumulative cell energy calculated:")
+        print(f"  - Total cell energy released: {total_energy_kJ:.3f} kJ ({cumulative_energy:.3f} J)")
+        
+        # Calculate cumulative energy E_gas (J)
+        E_gas = []
+        cumulative_energy_gas = 0.0
+        
+        for i in range(len(qgen_df)):
+            if i == 0:
+                # First point, no energy accumulated yet
+                E_gas.append(0.0)
+            else:
+                # Calculate time step
+                dt = time_sec[i] - time_sec[i-1]
+                # Trapezoidal integration: average power over time step
+                avg_power = (qgen_df['Q_dot_gas'].iloc[i] + qgen_df['Q_dot_gas'].iloc[i-1]) / 2.0
+                energy_increment = avg_power * dt
+                cumulative_energy_gas += energy_increment
+                E_gas.append(round(cumulative_energy_gas, 3))
+        
+        qgen_df['E_gas'] = E_gas
+        
+        # Convert cumulative gas energy to kJ for reporting
+        total_energy_gas_kJ = cumulative_energy_gas / 1000.0
+        
+        print(f"\n✓ Cumulative gas energy calculated:")
+        print(f"  - Total gas energy released: {total_energy_gas_kJ:.3f} kJ ({cumulative_energy_gas:.3f} J)")
+        
+        # Calculate E_total and E_ratio
+        qgen_df['E_total'] = (qgen_df['E_cell'] + qgen_df['E_gas']).round(3)
+        
+        # Calculate E_ratio = E_gas / E_cell (avoid division by zero)
+        E_ratio = []
+        for i in range(len(qgen_df)):
+            if qgen_df['E_cell'].iloc[i] != 0:
+                ratio = qgen_df['E_gas'].iloc[i] / qgen_df['E_cell'].iloc[i]
+            else:
+                ratio = 0.0
+            E_ratio.append(round(ratio, 3))
+        
+        qgen_df['E_ratio'] = E_ratio
+        
+        total_energy_total = qgen_df['E_total'].iloc[-1]
+        total_energy_total_kJ = total_energy_total / 1000.0
+        
+        print(f"\n✓ Total energy calculated:")
+        print(f"  - Total energy (E_cell + E_gas): {total_energy_total_kJ:.3f} kJ ({total_energy_total:.3f} J)")
         
         # Peak heat rate detection
         peak_idx = qgen_df['Q_dot_cell'].idxmax()
@@ -405,7 +492,20 @@ def create_qgen_analysis(csv_file, main_data):
         # Calculate energy released from t=0 to time of maximum T_Cell_Avg
         energy_to_max_temp = qgen_df['E_cell'].iloc[max_cell_temp_idx]
         energy_to_max_temp_kJ = energy_to_max_temp / 1000.0
-        energy_to_max_temp_Wh = energy_to_max_temp / 3600.0  # NEW: Convert J to Wh
+        energy_to_max_temp_Wh = energy_to_max_temp / 3600.0
+        
+        # Calculate gas energy released from t=0 to time of maximum T_Cell_Avg
+        energy_gas_to_max_temp = qgen_df['E_gas'].iloc[max_cell_temp_idx]
+        energy_gas_to_max_temp_kJ = energy_gas_to_max_temp / 1000.0
+        energy_gas_to_max_temp_Wh = energy_gas_to_max_temp / 3600.0
+        
+        # Calculate total energy released to max T_Cell_Avg
+        energy_total_to_max_temp = qgen_df['E_total'].iloc[max_cell_temp_idx]
+        energy_total_to_max_temp_kJ = energy_total_to_max_temp / 1000.0
+        energy_total_to_max_temp_Wh = energy_total_to_max_temp / 3600.0
+        
+        # Calculate energy ratio at max T_Cell_Avg
+        energy_ratio_to_max_temp = qgen_df['E_ratio'].iloc[max_cell_temp_idx]
         
         # Find maximum T_Gas_Avg and time
         max_gas_temp_idx = qgen_df['T_Gas_Avg'].idxmax()
@@ -413,17 +513,9 @@ def create_qgen_analysis(csv_file, main_data):
         max_gas_temp_time = qgen_df['Time (sec)'].iloc[max_gas_temp_idx]
         
         # Find maximum pressure from main data
-        pressure_column = '/RTAC Data/1000 Pressure'
-        if pressure_column in main_data.columns:
-            max_pressure_idx = main_data[pressure_column].idxmax()
-            max_pressure = main_data[pressure_column].iloc[max_pressure_idx]
-            max_pressure_time = main_data['Time (sec)'].iloc[max_pressure_idx]
-            pressure_available = True
-        else:
-            print(f"⚠ Warning: Pressure column '{pressure_column}' not found in data.")
-            max_pressure = 'N/A'
-            max_pressure_time = 'N/A'
-            pressure_available = False
+        max_pressure_idx = main_data[pressure_column].idxmax()
+        max_pressure = main_data[pressure_column].iloc[max_pressure_idx]
+        max_pressure_time = main_data['Time (sec)'].iloc[max_pressure_idx]
         
         # Find values at 60 seconds
         time_60_idx = (qgen_df['Time (sec)'] - 60).abs().idxmin()
@@ -433,25 +525,23 @@ def create_qgen_analysis(csv_file, main_data):
         energy_at_60 = qgen_df['E_cell'].iloc[time_60_idx]
         energy_at_60_kJ = energy_at_60 / 1000.0
         
-        if pressure_available:
-            # Find closest time in main_data to 60 sec
-            time_60_main_idx = (main_data['Time (sec)'] - 60).abs().idxmin()
-            pressure_at_60 = main_data[pressure_column].iloc[time_60_main_idx]
-        else:
-            pressure_at_60 = 'N/A'
+        # Find closest time in main_data to 60 sec
+        time_60_main_idx = (main_data['Time (sec)'] - 60).abs().idxmin()
+        pressure_at_60 = main_data[pressure_column].iloc[time_60_main_idx]
         
         print(f"\n✓ Additional metrics calculated:")
         print(f"  - Max Cell Avg Temperature: {max_cell_temp:.3f} °C at {max_cell_temp_time:.3f} sec")
-        print(f"  - Energy released to max T_Cell_Avg: {energy_to_max_temp_kJ:.3f} kJ ({energy_to_max_temp:.3f} J)")
+        print(f"  - Energy released by cell to max T_Cell_Avg: {energy_to_max_temp_kJ:.3f} kJ ({energy_to_max_temp:.3f} J, {energy_to_max_temp_Wh:.3f} Wh)")
+        print(f"  - Energy released by gas to max T_Cell_Avg: {energy_gas_to_max_temp_kJ:.3f} kJ ({energy_gas_to_max_temp:.3f} J, {energy_gas_to_max_temp_Wh:.3f} Wh)")
+        print(f"  - Total energy released to max T_Cell_Avg: {energy_total_to_max_temp_kJ:.3f} kJ ({energy_total_to_max_temp:.3f} J, {energy_total_to_max_temp_Wh:.3f} Wh)")
+        print(f"  - Energy ratio to max T_Cell_Avg: {energy_ratio_to_max_temp:.3f}")
         print(f"  - Max Gas Avg Temperature: {max_gas_temp:.3f} °C at {max_gas_temp_time:.3f} sec")
-        if pressure_available:
-            print(f"  - Max Pressure: {max_pressure:.3f} PSIG at {max_pressure_time:.3f} sec")
+        print(f"  - Max Pressure: {max_pressure:.3f} PSIG at {max_pressure_time:.3f} sec")
         print(f"  - At t=60 sec (actual: {actual_time_60:.3f} sec):")
         print(f"    • Cell Avg Temperature: {cell_temp_at_60:.3f} °C")
         print(f"    • Gas Avg Temperature: {gas_temp_at_60:.3f} °C")
         print(f"    • Energy released: {energy_at_60_kJ:.3f} kJ ({energy_at_60:.3f} J)")
-        if pressure_available:
-            print(f"    • Pressure: {pressure_at_60:.3f} PSIG")
+        print(f"    • Pressure: {pressure_at_60:.3f} PSIG")
         
         # Create Report DataFrame
         report_data = {
@@ -459,9 +549,23 @@ def create_qgen_analysis(csv_file, main_data):
                 'Cell Mass (m_cell)',
                 'Cell Specific Heat (Cp_cell)',
                 '',
-                'Energy Released to Max T_Cell_Avg',
-                'Energy Released to Max T_Cell_Avg',
-                'Energy Released to Max T_Cell_Avg',
+                'Enclosure Volume (V)',
+                'Gas Constant (R)',
+                'Gas Specific Heat (Cp_gas)',
+                '',
+                'Energy Released by Cell to Max T_Cell_Avg',
+                'Energy Released by Cell to Max T_Cell_Avg',
+                'Energy Released by Cell to Max T_Cell_Avg',
+                '',
+                'Energy Released by Gas to Max T_Cell_Avg',
+                'Energy Released by Gas to Max T_Cell_Avg',
+                'Energy Released by Gas to Max T_Cell_Avg',
+                '',
+                'Total Energy Released to Max T_Cell_Avg',
+                'Total Energy Released to Max T_Cell_Avg',
+                'Total Energy Released to Max T_Cell_Avg',
+                '',
+                'Energy Ratio to Max T_Cell_Avg',
                 '',
                 'Maximum Cell Avg Temperature',
                 'Time of Maximum Cell Avg Temperature',
@@ -483,9 +587,23 @@ def create_qgen_analysis(csv_file, main_data):
                 m_cell,
                 Cp_cell,
                 '',
+                V,
+                R,
+                Cp_gas,
+                '',
                 round(energy_to_max_temp, 3),
                 round(energy_to_max_temp_kJ, 3),
                 round(energy_to_max_temp_Wh, 3),
+                '',
+                round(energy_gas_to_max_temp, 3),
+                round(energy_gas_to_max_temp_kJ, 3),
+                round(energy_gas_to_max_temp_Wh, 3),
+                '',
+                round(energy_total_to_max_temp, 3),
+                round(energy_total_to_max_temp_kJ, 3),
+                round(energy_total_to_max_temp_Wh, 3),
+                '',
+                round(energy_ratio_to_max_temp, 3),
                 '',
                 round(max_cell_temp, 3),
                 round(max_cell_temp_time, 3),
@@ -493,13 +611,13 @@ def create_qgen_analysis(csv_file, main_data):
                 round(max_gas_temp, 3),
                 round(max_gas_temp_time, 3),
                 '',
-                round(max_pressure, 3) if pressure_available else max_pressure,
-                round(max_pressure_time, 3) if pressure_available else max_pressure_time,
+                round(max_pressure, 3),
+                round(max_pressure_time, 3),
                 '',
                 round(cell_temp_at_60, 3),
                 round(actual_time_60, 3),
                 round(gas_temp_at_60, 3),
-                round(pressure_at_60, 3) if pressure_available else pressure_at_60,
+                round(pressure_at_60, 3),
                 '',
                 len(selected_cell_tcs),
             ],
@@ -507,9 +625,23 @@ def create_qgen_analysis(csv_file, main_data):
                 'kg',
                 'J/(kg·K)',
                 '',
+                'm³',
+                'J/(mol·K)',
+                'J/(mol·K)',
+                '',
                 'J',
                 'kJ',
                 'Wh',
+                '',
+                'J',
+                'kJ',
+                'Wh',
+                '',
+                'J',
+                'kJ',
+                'Wh',
+                '',
+                'E_gas/E_cell',
                 '',
                 '°C',
                 'sec',
@@ -561,8 +693,10 @@ def create_qgen_analysis(csv_file, main_data):
             })
             report_df = pd.concat([report_df, new_row], ignore_index=True)
         
-        # Save to Excel file - REPLACE the original CSV with Excel format
-        excel_file = csv_file.replace('.csv', '.xlsx')
+        # Save to Excel file in the specified output directory
+        base_filename = os.path.basename(csv_file)
+        excel_filename = base_filename.replace('.csv', '.xlsx')
+        excel_file = os.path.join(output_directory, excel_filename)
         
         with pd.ExcelWriter(excel_file, engine='openpyxl', mode='w') as writer:
             main_data.to_excel(writer, sheet_name='Main Data', index=False)
@@ -572,7 +706,7 @@ def create_qgen_analysis(csv_file, main_data):
         print(f"\n✓ Q_gen Analysis sheet created successfully!")
         print(f"✓ Report sheet created successfully!")
         print(f"✓ File saved as: {excel_file}")
-        print(f"✓ Original CSV preserved: {csv_file}")
+        print(f"✓ Original CSV location: {csv_file}")
         print(f"\n✓ T_Cell_Avg calculated using {len(selected_cell_tcs)} channels:")
         for tc in selected_cell_tcs:
             tc_name = tc.replace('/RTAC Data/', '').strip()
@@ -590,7 +724,6 @@ def create_qgen_analysis(csv_file, main_data):
         import traceback
         traceback.print_exc()
         return None
-
 
 # --- Main Script ---
 
@@ -610,22 +743,34 @@ if __name__ == '__main__':
     # Ask user if they want to create Q_gen Analysis
     create_qgen = messagebox.askyesno("Q_gen Analysis", "Do you want to create Q_gen Analysis sheet?")
     
-    # Prompt the user to select the directory
-    directory = filedialog.askdirectory(title="Select the Directory with CSV Files")
+    # Prompt the user to select the INPUT directory (CSV files location)
+    input_directory = filedialog.askdirectory(title="Select the Directory with CSV Files")
     
-    if not directory:
-        print("!!ERROR!! - No directory selected. Exiting.")
+    if not input_directory:
+        print("!!ERROR!! - No input directory selected. Exiting.")
     else:
-        # Change the current working directory to the selected folder
-        os.chdir(directory)
+        # Prompt the user to select the OUTPUT directory (where Excel files will be saved)
+        output_directory = None
+        if create_qgen:
+            output_directory = filedialog.askdirectory(title="Select the Output Directory for Excel Files")
+            
+            if not output_directory:
+                print("!!ERROR!! - No output directory selected. Exiting.")
+                create_qgen = False
+            else:
+                print(f"\n✓ Output files will be saved to: {output_directory}")
+        
+        # Change the current working directory to the input folder
+        os.chdir(input_directory)
 
         # Now, you can simply use the file names without the full path
         csv_files = glob.glob("*.csv")
 
         if not csv_files:
             print("!!ERROR!! - No CSV files found in the specified directory.")
-        else:            
+        else:
             d = None  # Initialize d outside the loop
+            
             for csv_file in csv_files:
                 process_csv_data(csv_file)
                 
@@ -637,14 +782,12 @@ if __name__ == '__main__':
                     d = main_data.copy()
                 
                 # Create Q_gen Analysis if requested
-                if create_qgen:
-                    create_qgen_analysis(csv_file, main_data)
+                if create_qgen and output_directory:
+                    create_qgen_analysis(csv_file, main_data, output_directory)
             
             if d is not None:
                 print("\n\nFirst processed file loaded into DataFrame 'd' for further analysis.")
                 print(d.head())
-                
-                
 
 
 #%% #######Producing Temperature (all) plots in Minutes#####################################################################
