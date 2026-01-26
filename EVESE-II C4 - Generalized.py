@@ -10,6 +10,171 @@ import glob
 import os
 from tkinter import filedialog
 from tkinter import Tk
+import numpy as np
+
+def create_qgen_analysis(data, output_path=None):
+    """
+    Create Q_gen Analysis sheet with heat generation calculations.
+    
+    Parameters:
+    -----------
+    data : pd.DataFrame
+        DataFrame containing time series data with temperature measurements
+    output_path : str, optional
+        Path to save the Excel file. If None, saves to current directory as 'Q_gen_Analysis.xlsx'
+    
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame containing the Q_gen analysis results
+    """
+    print("\nCreating Q_gen Analysis...")
+    
+    # Create a copy of relevant columns
+    qgen_data = pd.DataFrame()
+    
+    # Add time columns
+    if 'Time (sec)' not in data.columns:
+        print("!!ERROR!! - 'Time (sec)' column not found in data.")
+        return None
+    
+    qgen_data['Time (sec)'] = data['Time (sec)']
+    qgen_data['Time (min)'] = data['Time (min)'] if 'Time (min)' in data.columns else data['Time (sec)'] / 60
+    qgen_data['Time (hour)'] = qgen_data['Time (min)'] / 60
+    
+    # Calculate average cell temperature (T_Cell_Avg) from available thermocouples
+    # Using the cell thermocouples mentioned in the script
+    cell_tc_columns = [
+        '/RTAC Data/TC1  Cell Positive',
+        '/RTAC Data/TC2  Cell Negative',
+        '/RTAC Data/TC3  Cell Front Center',
+        '/RTAC Data/TC4  Cell Back Center',
+        '/RTAC Data/TC5  Cell Vent',
+        '/RTAC Data/TC7  Cell Side Positive'
+    ]
+    
+    # Calculate average of available cell thermocouples
+    available_cell_tcs = [col for col in cell_tc_columns if col in data.columns]
+    if not available_cell_tcs:
+        print("!!ERROR!! - No cell thermocouple columns found.")
+        return None
+    
+    qgen_data['T_Cell_Avg'] = data[available_cell_tcs].mean(axis=1).round(3)
+    
+    # Calculate average gas/ambient temperature (T_Gas_Avg)
+    gas_tc_columns = [
+        '/RTAC Data/TC6  Enclosure Ambient',
+        '/RTAC Data/TC8  Enclosure Ambient Wire'
+    ]
+    
+    available_gas_tcs = [col for col in gas_tc_columns if col in data.columns]
+    if available_gas_tcs:
+        qgen_data['T_Gas_Avg'] = data[available_gas_tcs].mean(axis=1).round(3)
+    else:
+        # If no gas TCs available, set to NaN
+        qgen_data['T_Gas_Avg'] = np.nan
+    
+    # Calculate dT/dt_Cell (temperature derivative)
+    # Using central difference method for better accuracy
+    time_sec = qgen_data['Time (sec)'].values
+    temp_cell = qgen_data['T_Cell_Avg'].values
+    
+    dT_dt_Cell = np.zeros_like(temp_cell)
+    
+    # Forward difference for first point
+    if len(time_sec) > 1:
+        dt = time_sec[1] - time_sec[0]
+        if dt > 0:
+            dT_dt_Cell[0] = (temp_cell[1] - temp_cell[0]) / dt
+    
+    # Central difference for middle points
+    for i in range(1, len(temp_cell) - 1):
+        dt = time_sec[i + 1] - time_sec[i - 1]
+        if dt > 0:
+            dT_dt_Cell[i] = (temp_cell[i + 1] - temp_cell[i - 1]) / dt
+    
+    # Backward difference for last point
+    if len(time_sec) > 1:
+        dt = time_sec[-1] - time_sec[-2]
+        if dt > 0:
+            dT_dt_Cell[-1] = (temp_cell[-1] - temp_cell[-2]) / dt
+    
+    qgen_data['dT/dt_Cell'] = np.round(dT_dt_Cell, 3)
+    
+    # Calculate dT/dt_Gas if gas temperature available
+    if not qgen_data['T_Gas_Avg'].isna().all():
+        temp_gas = qgen_data['T_Gas_Avg'].values
+        dT_dt_Gas = np.zeros_like(temp_gas)
+        
+        # Forward difference for first point
+        if len(time_sec) > 1:
+            dt = time_sec[1] - time_sec[0]
+            if dt > 0:
+                dT_dt_Gas[0] = (temp_gas[1] - temp_gas[0]) / dt
+        
+        # Central difference for middle points
+        for i in range(1, len(temp_gas) - 1):
+            dt = time_sec[i + 1] - time_sec[i - 1]
+            if dt > 0:
+                dT_dt_Gas[i] = (temp_gas[i + 1] - temp_gas[i - 1]) / dt
+        
+        # Backward difference for last point
+        if len(time_sec) > 1:
+            dt = time_sec[-1] - time_sec[-2]
+            if dt > 0:
+                dT_dt_Gas[-1] = (temp_gas[-1] - temp_gas[-2]) / dt
+        
+        qgen_data['dT/dt_Gas'] = np.round(dT_dt_Gas, 3)
+    else:
+        qgen_data['dT/dt_Gas'] = np.nan
+    
+    # Calculate Q_cell_dot (heat generation rate in Watts)
+    # Q̇_cell = 990 × dT/dt_Cell (where 990 = m_cell × Cp_cell = 0.9 kg × 1100 J/(kg·K))
+    qgen_data['Q_cell_dot'] = np.round(990 * qgen_data['dT/dt_Cell'], 3)
+    
+    # Calculate E_cell_cumulative (cumulative energy in kJ)
+    Q_cell_dot = qgen_data['Q_cell_dot'].values
+    E_cell_cumulative = np.zeros_like(Q_cell_dot)
+    
+    for i in range(1, len(Q_cell_dot)):
+        # Calculate time step
+        dt = time_sec[i] - time_sec[i - 1]
+        
+        # Integrate using trapezoidal rule: E[i] = E[i-1] + (Q[i-1] + Q[i])/2 * dt
+        if dt > 0:
+            dE = 0.5 * (Q_cell_dot[i - 1] + Q_cell_dot[i]) * dt
+            E_cell_cumulative[i] = E_cell_cumulative[i - 1] + dE
+    
+    # Convert from Joules to kilojoules
+    qgen_data['E_cell_cumulative'] = np.round(E_cell_cumulative / 1000, 3)
+    
+    # Find peak heat rate and related metrics
+    if len(Q_cell_dot) > 0:
+        peak_idx = np.argmax(Q_cell_dot)
+        peak_heat_rate_W = Q_cell_dot[peak_idx]
+        peak_heat_rate_kW = peak_heat_rate_W / 1000
+        time_at_peak = time_sec[peak_idx]
+        temp_at_peak = temp_cell[peak_idx]
+        total_energy_kJ = E_cell_cumulative[-1] / 1000 if len(E_cell_cumulative) > 0 else 0
+        
+        # Print summary metrics
+        print("✓ Heat generation analysis completed:")
+        print(f"  - Peak heat rate: {peak_heat_rate_kW:.3f} kW at t = {time_at_peak:.3f} sec (T_Cell = {temp_at_peak:.1f}°C)")
+        print(f"  - Total energy released: {total_energy_kJ:.3f} kJ")
+    
+    # Save to Excel file
+    if output_path is None:
+        output_path = 'Q_gen_Analysis.xlsx'
+    
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            qgen_data.to_excel(writer, sheet_name='Q_gen Analysis', index=False)
+        print(f"\nQ_gen Analysis saved to: {output_path}")
+    except Exception as e:
+        print(f"!!WARNING!! - Could not save Excel file: {e}")
+        print("Returning DataFrame instead.")
+    
+    return qgen_data
 
 def process_csv_data(file_path):
     """
@@ -78,6 +243,8 @@ if __name__ == '__main__':
                 print("\n\nFirst processed file loaded into DataFrame 'd' for further analysis.")
                 print(d.head())
                 
+                # Create Q_gen Analysis
+                qgen_df = create_qgen_analysis(d)
                 
 
 
