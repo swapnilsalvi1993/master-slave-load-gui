@@ -191,13 +191,19 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
     Cp_gas = 34  # J/(mol·K)
     
     try:
-        # Check if required columns exist
-        required_time_cols = ['Time (sec)', 'Time (min)', 'Time (hour)']
-        missing_cols = [col for col in required_time_cols if col not in main_data.columns]
-        
-        if missing_cols:
-            print(f"!!ERROR!! - Missing time columns: {missing_cols}")
+        # Check if Time (sec) column exists (REQUIRED)
+        if 'Time (sec)' not in main_data.columns:
+            print(f"!!ERROR!! - 'Time (sec)' column is missing. Cannot proceed with analysis.")
             return
+        
+        # Check for optional time columns
+        has_time_min = 'Time (min)' in main_data.columns
+        has_time_hour = 'Time (hour)' in main_data.columns
+        
+        if not has_time_min:
+            print(f"⚠ Warning: 'Time (min)' column not found. It will be skipped.")
+        if not has_time_hour:
+            print(f"⚠ Warning: 'Time (hour)' column not found. It will be skipped.")
         
         # Get all temperature columns
         temp_columns = get_temperature_columns(main_data)
@@ -241,10 +247,12 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         # Create Q_gen Analysis DataFrame
         qgen_df = pd.DataFrame()
         
-        # Copy time columns
+        # Copy time columns (only those that exist)
         qgen_df['Time (sec)'] = main_data['Time (sec)']
-        qgen_df['Time (min)'] = main_data['Time (min)']
-        qgen_df['Time (hour)'] = main_data['Time (hour)']
+        if has_time_min:
+            qgen_df['Time (min)'] = main_data['Time (min)']
+        if has_time_hour:
+            qgen_df['Time (hour)'] = main_data['Time (hour)']
         
         # Calculate T_Cell_Avg from selected thermocouples
         tc_data = main_data[selected_cell_tcs]
@@ -474,15 +482,23 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         peak_idx = qgen_df['Q_dot_cell'].idxmax()
         peak_power = qgen_df['Q_dot_cell'].iloc[peak_idx]
         peak_time_sec = qgen_df['Time (sec)'].iloc[peak_idx]
-        peak_time_min = qgen_df['Time (min)'].iloc[peak_idx]
         peak_temp = qgen_df['T_Cell_Avg'].iloc[peak_idx]
         peak_dT_dt = qgen_df['dT/dt_Cell'].iloc[peak_idx]
         
-        print(f"\n✓ Peak heat generation detected:")
-        print(f"  - Peak power (Q_dot_cell_max): {peak_power:.3f} W ({peak_power/1000:.3f} kW)")
-        print(f"  - Time of peak: {peak_time_sec:.3f} sec ({peak_time_min:.3f} min)")
-        print(f"  - Cell temperature at peak: {peak_temp:.3f} °C")
-        print(f"  - Heating rate at peak: {peak_dT_dt:.3f} K/sec")
+        # Only calculate time in minutes if column exists
+        if has_time_min:
+            peak_time_min = qgen_df['Time (min)'].iloc[peak_idx]
+            print(f"\n✓ Peak heat generation detected:")
+            print(f"  - Peak power (Q_dot_cell_max): {peak_power:.3f} W ({peak_power/1000:.3f} kW)")
+            print(f"  - Time of peak: {peak_time_sec:.3f} sec ({peak_time_min:.3f} min)")
+            print(f"  - Cell temperature at peak: {peak_temp:.3f} °C")
+            print(f"  - Heating rate at peak: {peak_dT_dt:.3f} K/sec")
+        else:
+            print(f"\n✓ Peak heat generation detected:")
+            print(f"  - Peak power (Q_dot_cell_max): {peak_power:.3f} W ({peak_power/1000:.3f} kW)")
+            print(f"  - Time of peak: {peak_time_sec:.3f} sec")
+            print(f"  - Cell temperature at peak: {peak_temp:.3f} °C")
+            print(f"  - Heating rate at peak: {peak_dT_dt:.3f} K/sec")
         
         # Find maximum T_Cell_Avg and time
         max_cell_temp_idx = qgen_df['T_Cell_Avg'].idxmax()
@@ -529,6 +545,61 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         time_60_main_idx = (main_data['Time (sec)'] - 60).abs().idxmin()
         pressure_at_60 = main_data[pressure_column].iloc[time_60_main_idx]
         
+        # Find values at 5, 10, and 15 seconds
+        # At 5 seconds
+        time_5_idx = (qgen_df['Time (sec)'] - 5).abs().idxmin()
+        actual_time_5 = qgen_df['Time (sec)'].iloc[time_5_idx]
+        cell_temp_at_5 = qgen_df['T_Cell_Avg'].iloc[time_5_idx]
+        gas_temp_at_5 = qgen_df['T_Gas_Avg'].iloc[time_5_idx]
+        energy_cell_at_5 = qgen_df['E_cell'].iloc[time_5_idx]
+        energy_cell_at_5_kJ = energy_cell_at_5 / 1000.0
+        energy_cell_at_5_Wh = energy_cell_at_5 / 3600.0
+        energy_gas_at_5 = qgen_df['E_gas'].iloc[time_5_idx]
+        energy_gas_at_5_kJ = energy_gas_at_5 / 1000.0
+        energy_gas_at_5_Wh = energy_gas_at_5 / 3600.0
+        energy_total_at_5 = qgen_df['E_total'].iloc[time_5_idx]
+        energy_total_at_5_kJ = energy_total_at_5 / 1000.0
+        energy_total_at_5_Wh = energy_total_at_5 / 3600.0
+        energy_ratio_at_5 = qgen_df['E_ratio'].iloc[time_5_idx]
+        time_5_main_idx = (main_data['Time (sec)'] - 5).abs().idxmin()
+        pressure_at_5 = main_data[pressure_column].iloc[time_5_main_idx]
+        
+        # At 10 seconds
+        time_10_idx = (qgen_df['Time (sec)'] - 10).abs().idxmin()
+        actual_time_10 = qgen_df['Time (sec)'].iloc[time_10_idx]
+        cell_temp_at_10 = qgen_df['T_Cell_Avg'].iloc[time_10_idx]
+        gas_temp_at_10 = qgen_df['T_Gas_Avg'].iloc[time_10_idx]
+        energy_cell_at_10 = qgen_df['E_cell'].iloc[time_10_idx]
+        energy_cell_at_10_kJ = energy_cell_at_10 / 1000.0
+        energy_cell_at_10_Wh = energy_cell_at_10 / 3600.0
+        energy_gas_at_10 = qgen_df['E_gas'].iloc[time_10_idx]
+        energy_gas_at_10_kJ = energy_gas_at_10 / 1000.0
+        energy_gas_at_10_Wh = energy_gas_at_10 / 3600.0
+        energy_total_at_10 = qgen_df['E_total'].iloc[time_10_idx]
+        energy_total_at_10_kJ = energy_total_at_10 / 1000.0
+        energy_total_at_10_Wh = energy_total_at_10 / 3600.0
+        energy_ratio_at_10 = qgen_df['E_ratio'].iloc[time_10_idx]
+        time_10_main_idx = (main_data['Time (sec)'] - 10).abs().idxmin()
+        pressure_at_10 = main_data[pressure_column].iloc[time_10_main_idx]
+        
+        # At 15 seconds
+        time_15_idx = (qgen_df['Time (sec)'] - 15).abs().idxmin()
+        actual_time_15 = qgen_df['Time (sec)'].iloc[time_15_idx]
+        cell_temp_at_15 = qgen_df['T_Cell_Avg'].iloc[time_15_idx]
+        gas_temp_at_15 = qgen_df['T_Gas_Avg'].iloc[time_15_idx]
+        energy_cell_at_15 = qgen_df['E_cell'].iloc[time_15_idx]
+        energy_cell_at_15_kJ = energy_cell_at_15 / 1000.0
+        energy_cell_at_15_Wh = energy_cell_at_15 / 3600.0
+        energy_gas_at_15 = qgen_df['E_gas'].iloc[time_15_idx]
+        energy_gas_at_15_kJ = energy_gas_at_15 / 1000.0
+        energy_gas_at_15_Wh = energy_gas_at_15 / 3600.0
+        energy_total_at_15 = qgen_df['E_total'].iloc[time_15_idx]
+        energy_total_at_15_kJ = energy_total_at_15 / 1000.0
+        energy_total_at_15_Wh = energy_total_at_15 / 3600.0
+        energy_ratio_at_15 = qgen_df['E_ratio'].iloc[time_15_idx]
+        time_15_main_idx = (main_data['Time (sec)'] - 15).abs().idxmin()
+        pressure_at_15 = main_data[pressure_column].iloc[time_15_main_idx]
+        
         print(f"\n✓ Additional metrics calculated:")
         print(f"  - Max Cell Avg Temperature: {max_cell_temp:.3f} °C at {max_cell_temp_time:.3f} sec")
         print(f"  - Energy released by cell to max T_Cell_Avg: {energy_to_max_temp_kJ:.3f} kJ ({energy_to_max_temp:.3f} J, {energy_to_max_temp_Wh:.3f} Wh)")
@@ -537,6 +608,30 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         print(f"  - Energy ratio to max T_Cell_Avg: {energy_ratio_to_max_temp:.3f}")
         print(f"  - Max Gas Avg Temperature: {max_gas_temp:.3f} °C at {max_gas_temp_time:.3f} sec")
         print(f"  - Max Pressure: {max_pressure:.3f} PSIG at {max_pressure_time:.3f} sec")
+        print(f"  - At t=5 sec (actual: {actual_time_5:.3f} sec):")
+        print(f"    • Cell Avg Temperature: {cell_temp_at_5:.3f} °C")
+        print(f"    • Gas Avg Temperature: {gas_temp_at_5:.3f} °C")
+        print(f"    • Energy released by cell: {energy_cell_at_5_kJ:.3f} kJ")
+        print(f"    • Energy released by gas: {energy_gas_at_5_kJ:.3f} kJ")
+        print(f"    • Total energy: {energy_total_at_5_kJ:.3f} kJ")
+        print(f"    • Energy ratio: {energy_ratio_at_5:.3f}")
+        print(f"    • Pressure: {pressure_at_5:.3f} PSIG")
+        print(f"  - At t=10 sec (actual: {actual_time_10:.3f} sec):")
+        print(f"    • Cell Avg Temperature: {cell_temp_at_10:.3f} °C")
+        print(f"    • Gas Avg Temperature: {gas_temp_at_10:.3f} °C")
+        print(f"    • Energy released by cell: {energy_cell_at_10_kJ:.3f} kJ")
+        print(f"    • Energy released by gas: {energy_gas_at_10_kJ:.3f} kJ")
+        print(f"    • Total energy: {energy_total_at_10_kJ:.3f} kJ")
+        print(f"    • Energy ratio: {energy_ratio_at_10:.3f}")
+        print(f"    • Pressure: {pressure_at_10:.3f} PSIG")
+        print(f"  - At t=15 sec (actual: {actual_time_15:.3f} sec):")
+        print(f"    • Cell Avg Temperature: {cell_temp_at_15:.3f} °C")
+        print(f"    • Gas Avg Temperature: {gas_temp_at_15:.3f} °C")
+        print(f"    • Energy released by cell: {energy_cell_at_15_kJ:.3f} kJ")
+        print(f"    • Energy released by gas: {energy_gas_at_15_kJ:.3f} kJ")
+        print(f"    • Total energy: {energy_total_at_15_kJ:.3f} kJ")
+        print(f"    • Energy ratio: {energy_ratio_at_15:.3f}")
+        print(f"    • Pressure: {pressure_at_15:.3f} PSIG")
         print(f"  - At t=60 sec (actual: {actual_time_60:.3f} sec):")
         print(f"    • Cell Avg Temperature: {cell_temp_at_60:.3f} °C")
         print(f"    • Gas Avg Temperature: {gas_temp_at_60:.3f} °C")
@@ -576,6 +671,54 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
                 'Maximum Pressure',
                 'Time of Maximum Pressure',
                 '',
+                '--- Values at t = 5 sec ---',
+                'Actual Time',
+                'Energy Released by Cell at t=5 sec',
+                'Energy Released by Cell at t=5 sec',
+                'Energy Released by Cell at t=5 sec',
+                'Energy Released by Gas at t=5 sec',
+                'Energy Released by Gas at t=5 sec',
+                'Energy Released by Gas at t=5 sec',
+                'Total Energy Released at t=5 sec',
+                'Total Energy Released at t=5 sec',
+                'Total Energy Released at t=5 sec',
+                'Energy Ratio at t=5 sec',
+                'Cell Avg Temperature at t=5 sec',
+                'Gas Avg Temperature at t=5 sec',
+                'Pressure at t=5 sec',
+                '',
+                '--- Values at t = 10 sec ---',
+                'Actual Time',
+                'Energy Released by Cell at t=10 sec',
+                'Energy Released by Cell at t=10 sec',
+                'Energy Released by Cell at t=10 sec',
+                'Energy Released by Gas at t=10 sec',
+                'Energy Released by Gas at t=10 sec',
+                'Energy Released by Gas at t=10 sec',
+                'Total Energy Released at t=10 sec',
+                'Total Energy Released at t=10 sec',
+                'Total Energy Released at t=10 sec',
+                'Energy Ratio at t=10 sec',
+                'Cell Avg Temperature at t=10 sec',
+                'Gas Avg Temperature at t=10 sec',
+                'Pressure at t=10 sec',
+                '',
+                '--- Values at t = 15 sec ---',
+                'Actual Time',
+                'Energy Released by Cell at t=15 sec',
+                'Energy Released by Cell at t=15 sec',
+                'Energy Released by Cell at t=15 sec',
+                'Energy Released by Gas at t=15 sec',
+                'Energy Released by Gas at t=15 sec',
+                'Energy Released by Gas at t=15 sec',
+                'Total Energy Released at t=15 sec',
+                'Total Energy Released at t=15 sec',
+                'Total Energy Released at t=15 sec',
+                'Energy Ratio at t=15 sec',
+                'Cell Avg Temperature at t=15 sec',
+                'Gas Avg Temperature at t=15 sec',
+                'Pressure at t=15 sec',
+                '',
                 'Cell Avg Temperature at t=60 sec',
                 'Actual Time',
                 'Gas Avg Temperature at t=60 sec',
@@ -614,6 +757,54 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
                 round(max_pressure, 3),
                 round(max_pressure_time, 3),
                 '',
+                '',
+                round(actual_time_5, 3),
+                round(energy_cell_at_5, 3),
+                round(energy_cell_at_5_kJ, 3),
+                round(energy_cell_at_5_Wh, 3),
+                round(energy_gas_at_5, 3),
+                round(energy_gas_at_5_kJ, 3),
+                round(energy_gas_at_5_Wh, 3),
+                round(energy_total_at_5, 3),
+                round(energy_total_at_5_kJ, 3),
+                round(energy_total_at_5_Wh, 3),
+                round(energy_ratio_at_5, 3),
+                round(cell_temp_at_5, 3),
+                round(gas_temp_at_5, 3),
+                round(pressure_at_5, 3),
+                '',
+                '',
+                round(actual_time_10, 3),
+                round(energy_cell_at_10, 3),
+                round(energy_cell_at_10_kJ, 3),
+                round(energy_cell_at_10_Wh, 3),
+                round(energy_gas_at_10, 3),
+                round(energy_gas_at_10_kJ, 3),
+                round(energy_gas_at_10_Wh, 3),
+                round(energy_total_at_10, 3),
+                round(energy_total_at_10_kJ, 3),
+                round(energy_total_at_10_Wh, 3),
+                round(energy_ratio_at_10, 3),
+                round(cell_temp_at_10, 3),
+                round(gas_temp_at_10, 3),
+                round(pressure_at_10, 3),
+                '',
+                '',
+                round(actual_time_15, 3),
+                round(energy_cell_at_15, 3),
+                round(energy_cell_at_15_kJ, 3),
+                round(energy_cell_at_15_Wh, 3),
+                round(energy_gas_at_15, 3),
+                round(energy_gas_at_15_kJ, 3),
+                round(energy_gas_at_15_Wh, 3),
+                round(energy_total_at_15, 3),
+                round(energy_total_at_15_kJ, 3),
+                round(energy_total_at_15_Wh, 3),
+                round(energy_ratio_at_15, 3),
+                round(cell_temp_at_15, 3),
+                round(gas_temp_at_15, 3),
+                round(pressure_at_15, 3),
+                '',
                 round(cell_temp_at_60, 3),
                 round(actual_time_60, 3),
                 round(gas_temp_at_60, 3),
@@ -651,6 +842,54 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
                 '',
                 'PSIG',
                 'sec',
+                '',
+                '',
+                'sec',
+                'J',
+                'kJ',
+                'Wh',
+                'J',
+                'kJ',
+                'Wh',
+                'J',
+                'kJ',
+                'Wh',
+                'E_gas/E_cell',
+                '°C',
+                '°C',
+                'PSIG',
+                '',
+                '',
+                'sec',
+                'J',
+                'kJ',
+                'Wh',
+                'J',
+                'kJ',
+                'Wh',
+                'J',
+                'kJ',
+                'Wh',
+                'E_gas/E_cell',
+                '°C',
+                '°C',
+                'PSIG',
+                '',
+                '',
+                'sec',
+                'J',
+                'kJ',
+                'Wh',
+                'J',
+                'kJ',
+                'Wh',
+                'J',
+                'kJ',
+                'Wh',
+                'E_gas/E_cell',
+                '°C',
+                '°C',
+                'PSIG',
                 '',
                 '°C',
                 'sec',
