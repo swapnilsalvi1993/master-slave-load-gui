@@ -2,34 +2,332 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-from tkinter import Tk, filedialog
+import sys
+import tkinter as tk
+from tkinter import Tk, filedialog, ttk, messagebox
+from scipy import stats
+
+print("Starting script...")
 
 # Try to import pyxlsb, provide helpful error if not available
 try:
     import pyxlsb
     has_pyxlsb = True
+    print("✓ pyxlsb module loaded")
 except ImportError:
     has_pyxlsb = False
     print("⚠ Warning: pyxlsb not installed.")
     print("To install, run: pip install pyxlsb")
-    print("\nAlternative: Save your .xlsb file as .xlsx and update the file path in the script.")
-    response = input("\nDo you want to continue and select an .xlsx file instead? (y/n): ")
-    if response.lower() != 'y':
-        print("Exiting. Please install pyxlsb using: pip install pyxlsb")
-        exit()
 
-# Hide the main tkinter window
+# All available plot parameters grouped by category
+# Format: (y_param_name, y_unit, x_param_name, x_unit, short_name_for_file, category_for_ylim, display_name)
+ALL_PLOT_PARAMS = {
+    'Temperature Plots': [
+        ('Maximum Cell Avg Temperature', '°C', 'Usable Capacity', '%', 'Max_Cell_Temperature_vs_UsableCapacity', 'temperature', 'Maximum Cell Avg Temperature vs Usable Capacity'),
+        ('Cell Avg Temperature at t=60 sec', '°C', 'Usable Capacity', '%', 'Cell_Temperature_60sec_vs_UsableCapacity', 'temperature', 'Cell Avg Temperature at t=60 sec vs Usable Capacity'),
+    ],
+    
+    'Pressure Plots': [
+        ('Maximum Pressure', 'PSIG', 'Usable Capacity', '%', 'Max_Pressure_vs_UsableCapacity', 'pressure', 'Maximum Pressure vs Usable Capacity'),
+        ('Pressure at t=60 sec', 'PSIG', 'Usable Capacity', '%', 'Pressure_60sec_vs_UsableCapacity', 'pressure', 'Pressure at t=60 sec vs Usable Capacity'),
+    ],
+    
+    'Energy Plots': [
+        ('Energy Released by Cell to Max T_Cell_Avg', 'Wh', 'Usable Capacity', '%', 'Energy_Released_Cell_vs_UsableCapacity', 'energy', 'Energy Released by Cell vs Usable Capacity'),
+        ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Usable Capacity', '%', 'Total_Energy_Released_vs_UsableCapacity', 'total_energy', 'Total Energy Released vs Usable Capacity'),
+        ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Cell specific Mass Loss', 'g', 'Total_Energy_Released_vs_Cell_Mass_Loss', 'total_energy', 'Total Energy Released vs Cell Mass Loss'),
+        ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Maximum Pressure', 'PSIG', 'Total_Energy_Released_vs_Max_Pressure', 'total_energy', 'Total Energy Released vs Maximum Pressure'),
+    ],
+    
+    'Mass & Gas Generation': [
+        ('Cell specific Mass Loss', 'g', 'Usable Capacity', '%', 'Cell_Mass_Loss_vs_UsableCapacity', 'mass', 'Cell specific Mass Loss vs Usable Capacity'),
+        ('Gas generation', 'g', 'Usable Capacity', '%', 'Gas_Generation_vs_UsableCapacity', 'gas', 'Gas Generation vs Usable Capacity'),
+        ('Gas rate', 'mmol/Wh', 'Usable Capacity', '%', 'Gas_Rate_mmol_Wh_vs_UsableCapacity', 'gas_rate', 'Gas Rate (mmol/Wh) vs Usable Capacity'),
+        ('Gas rate', 'sL/kWh', 'Usable Capacity', '%', 'Gas_Rate_sL_kWh_vs_UsableCapacity', 'gas_rate', 'Gas Rate (sL/kWh) vs Usable Capacity'),
+        ('Particle Size Distribution (50th Percentile)', 'μm', 'Usable Capacity', '%', 'Particle_Size_Distribution_50th_Percentile_vs_UsableCapacity', 'particle_size', 'Particle Size Distribution (50th Percentile) vs Usable Capacity'),
+    ],
+    
+    'Major Gas Emissions': [
+        ('Carbon Dioxide', 'vol %', 'Usable Capacity', '%', 'Carbon_Dioxide_vs_UsableCapacity', 'emissions', 'Carbon Dioxide vs Usable Capacity'),
+        ('CH4', 'vol %', 'Usable Capacity', '%', 'CH4_vs_UsableCapacity', 'emissions', 'CH4 vs Usable Capacity'),
+        ('Carbon Monoxide', 'vol %', 'Usable Capacity', '%', 'Carbon_Monoxide_vs_UsableCapacity', 'emissions', 'Carbon Monoxide vs Usable Capacity'),
+        ('Oxygen', 'vol %', 'Usable Capacity', '%', 'Oxygen_vs_UsableCapacity', 'emissions', 'Oxygen vs Usable Capacity'),
+        ('Nitrogen', 'vol %', 'Usable Capacity', '%', 'Nitrogen_vs_UsableCapacity', 'emissions', 'Nitrogen vs Usable Capacity'),
+        ('Hydrogen', 'vol %', 'Usable Capacity', '%', 'Hydrogen_vs_UsableCapacity', 'emissions', 'Hydrogen vs Usable Capacity'),
+    ],
+    
+    'Electrolytes': [
+        ('Identified Electrolytes', 'vol %', 'Usable Capacity', '%', 'Identified_Electrolytes_vs_UsableCapacity', 'electrolytes', 'Identified Electrolytes vs Usable Capacity'),
+        ('Unknown C2-C4*', 'vol %', 'Usable Capacity', '%', 'Unknown_C2_C4_vs_UsableCapacity', 'electrolytes', 'Unknown C2-C4* vs Usable Capacity'),
+        ('C5-C12**', 'vol %', 'Usable Capacity', '%', 'C5_C12_vs_UsableCapacity', 'electrolytes', 'C5-C12** vs Usable Capacity'),
+    ],
+    
+    'C2 Hydrocarbons': [
+        ('ETHANE', 'vol %', 'Usable Capacity', '%', 'ETHANE_vs_UsableCapacity', 'hydrocarbons', 'ETHANE vs Usable Capacity'),
+        ('ETHYLENE', 'vol %', 'Usable Capacity', '%', 'ETHYLENE_vs_UsableCapacity', 'hydrocarbons', 'ETHYLENE vs Usable Capacity'),
+        ('ACETYLENE', 'vol %', 'Usable Capacity', '%', 'ACETYLENE_vs_UsableCapacity', 'hydrocarbons', 'ACETYLENE vs Usable Capacity'),
+    ],
+    
+    'C3 Hydrocarbons': [
+        ('PROPANE', 'vol %', 'Usable Capacity', '%', 'PROPANE_vs_UsableCapacity', 'hydrocarbons', 'PROPANE vs Usable Capacity'),
+        ('PROPYLENE', 'vol %', 'Usable Capacity', '%', 'PROPYLENE_vs_UsableCapacity', 'hydrocarbons', 'PROPYLENE vs Usable Capacity'),
+    ],
+    
+    'C4 Hydrocarbons': [
+        ('BUTANE', 'vol %', 'Usable Capacity', '%', 'BUTANE_vs_UsableCapacity', 'hydrocarbons', 'BUTANE vs Usable Capacity'),
+        ('TRANS-2-BUTENE', 'vol %', 'Usable Capacity', '%', 'TRANS_2_BUTENE_vs_UsableCapacity', 'hydrocarbons', 'TRANS-2-BUTENE vs Usable Capacity'),
+        ('1-BUTENE', 'vol %', 'Usable Capacity', '%', '1_BUTENE_vs_UsableCapacity', 'hydrocarbons', '1-BUTENE vs Usable Capacity'),
+        ('2-METHYLPROPENE (ISOBUTYLENE)', 'vol %', 'Usable Capacity', '%', '2_METHYLPROPENE_ISOBUTYLENE_vs_UsableCapacity', 'hydrocarbons', '2-METHYLPROPENE (ISOBUTYLENE) vs Usable Capacity'),
+        ('1,3-BUTADIENE', 'vol %', 'Usable Capacity', '%', '1_3_BUTADIENE_vs_UsableCapacity', 'hydrocarbons', '1,3-BUTADIENE vs Usable Capacity'),
+        ('2-METHYLPROPANE (ISOBUTANE)', 'vol %', 'Usable Capacity', '%', '2_METHYLPROPANE_ISOBUTANE_vs_UsableCapacity', 'hydrocarbons', '2-METHYLPROPANE (ISOBUTANE) vs Usable Capacity'),
+        ('CIS-2-BUTENE', 'vol %', 'Usable Capacity', '%', 'CIS_2_BUTENE_vs_UsableCapacity', 'hydrocarbons', 'CIS-2-BUTENE vs Usable Capacity'),
+    ],
+    
+    'C5 Hydrocarbons': [
+        ('2-METHYLBUTANE (ISOPENTANE)', 'vol %', 'Usable Capacity', '%', '2_METHYLBUTANE_ISOPENTANE_vs_UsableCapacity', 'hydrocarbons', '2-METHYLBUTANE (ISOPENTANE) vs Usable Capacity'),
+    ],
+}
+
+print(f"Total available plots: {sum(len(plots) for plots in ALL_PLOT_PARAMS.values())}")
+
+# Create plot selection dialog
+class PlotSelectionDialog:
+    def __init__(self, parent):
+        print("Creating plot selection dialog...")
+        self.parent = parent
+        self.result = []
+        self.checkboxes = {}
+        self.category_vars = {}
+        self.fitting_line_12_var = None
+        self.fitting_line_134_var = None
+        
+        # Create dialog window
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Select Plots to Generate")
+        self.dialog.geometry("700x850")
+        
+        # Make sure dialog appears on top
+        self.dialog.lift()
+        self.dialog.focus_force()
+        
+        # Main frame with scrollbar
+        main_frame = ttk.Frame(self.dialog, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Configure grid weights
+        self.dialog.columnconfigure(0, weight=1)
+        self.dialog.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(1, weight=1)
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Select Scatter Plots to Generate", 
+                               font=('Arial', 14, 'bold'))
+        title_label.grid(row=0, column=0, pady=10, sticky=tk.W)
+        
+        # Create canvas with scrollbar
+        canvas = tk.Canvas(main_frame, borderwidth=0, background="#f0f0f0")
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Pack canvas and scrollbar
+        canvas.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar.grid(row=1, column=1, sticky=(tk.N, tk.S))
+        
+        # Add checkboxes grouped by category
+        row = 0
+        for category, plots in ALL_PLOT_PARAMS.items():
+            # Category frame
+            category_frame = ttk.LabelFrame(scrollable_frame, text=category, padding="10")
+            category_frame.grid(row=row, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
+            category_frame.columnconfigure(0, weight=1)
+            
+            # Category select all checkbox
+            cat_var = tk.BooleanVar(value=False)
+            self.category_vars[category] = cat_var
+            cat_checkbox = ttk.Checkbutton(
+                category_frame, 
+                text=f"Select All {category}",
+                variable=cat_var,
+                command=lambda c=category: self.toggle_category(c)
+            )
+            cat_checkbox.grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+            
+            # Individual plot checkboxes
+            self.checkboxes[category] = []
+            for idx, plot in enumerate(plots, start=1):
+                var = tk.BooleanVar(value=False)
+                cb = ttk.Checkbutton(
+                    category_frame, 
+                    text=plot[6],  # display_name
+                    variable=var
+                )
+                cb.grid(row=idx, column=0, sticky=tk.W, padx=20)
+                self.checkboxes[category].append((var, plot))
+            
+            row += 1
+        
+        # Fitting Line Options Frame
+        fitting_frame = ttk.LabelFrame(scrollable_frame, text="Fitting Line Options", padding="10")
+        fitting_frame.grid(row=row, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
+        fitting_frame.columnconfigure(0, weight=1)
+        
+        # Fitting line checkboxes
+        self.fitting_line_12_var = tk.BooleanVar(value=False)
+        fitting_12_cb = ttk.Checkbutton(
+            fitting_frame,
+            text="Add Fitting Line: Run1-2 (Linear fit through Run1 and Run2 data points)",
+            variable=self.fitting_line_12_var
+        )
+        fitting_12_cb.grid(row=0, column=0, sticky=tk.W, pady=2)
+        
+        self.fitting_line_134_var = tk.BooleanVar(value=False)
+        fitting_134_cb = ttk.Checkbutton(
+            fitting_frame,
+            text="Add Fitting Line: Run1-3-4 (Linear fit through Run1, Run3, and Run4 data points)",
+            variable=self.fitting_line_134_var
+        )
+        fitting_134_cb.grid(row=1, column=0, sticky=tk.W, pady=2)
+        
+        row += 1
+        
+        # Button frame
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=2, column=0, columnspan=2, pady=10)
+        
+        # Select All button
+        select_all_btn = ttk.Button(button_frame, text="Select All", 
+                                    command=self.select_all, width=15)
+        select_all_btn.grid(row=0, column=0, padx=5)
+        
+        # Deselect All button
+        deselect_all_btn = ttk.Button(button_frame, text="Deselect All", 
+                                      command=self.deselect_all, width=15)
+        deselect_all_btn.grid(row=0, column=1, padx=5)
+        
+        # OK button
+        ok_btn = ttk.Button(button_frame, text="Generate Plots", 
+                           command=self.ok, width=15)
+        ok_btn.grid(row=0, column=2, padx=5)
+        
+        # Cancel button
+        cancel_btn = ttk.Button(button_frame, text="Cancel", 
+                               command=self.cancel, width=15)
+        cancel_btn.grid(row=0, column=3, padx=5)
+        
+        # Bind mouse wheel for scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        
+        # Center the dialog
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (self.dialog.winfo_width() // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (self.dialog.winfo_height() // 2)
+        self.dialog.geometry(f'+{x}+{y}')
+        
+        print("Dialog created and displayed")
+    
+    def toggle_category(self, category):
+        """Toggle all checkboxes in a category"""
+        state = self.category_vars[category].get()
+        for var, plot in self.checkboxes[category]:
+            var.set(state)
+    
+    def select_all(self):
+        """Select all plots"""
+        print("Selecting all plots...")
+        for category in self.checkboxes:
+            self.category_vars[category].set(True)
+            for var, plot in self.checkboxes[category]:
+                var.set(True)
+    
+    def deselect_all(self):
+        """Deselect all plots"""
+        print("Deselecting all plots...")
+        for category in self.checkboxes:
+            self.category_vars[category].set(False)
+            for var, plot in self.checkboxes[category]:
+                var.set(False)
+    
+    def ok(self):
+        """Collect selected plots and close dialog"""
+        print("Collecting selected plots...")
+        self.result = []
+        for category in self.checkboxes:
+            for var, plot in self.checkboxes[category]:
+                if var.get():
+                    self.result.append(plot)
+        
+        if not self.result:
+            messagebox.showwarning("No Selection", "Please select at least one plot to generate.")
+            return
+        
+        print(f"Selected {len(self.result)} plots")
+        print(f"Fitting Line Run1-2: {self.fitting_line_12_var.get()}")
+        print(f"Fitting Line Run1-3-4: {self.fitting_line_134_var.get()}")
+        self.dialog.destroy()
+    
+    def cancel(self):
+        """Cancel and close dialog"""
+        print("Dialog cancelled")
+        self.result = []
+        self.dialog.destroy()
+    
+    def show(self):
+        """Show dialog and return selected plots and fitting options"""
+        print("Waiting for user selection...")
+        self.parent.wait_window(self.dialog)
+        return self.result, self.fitting_line_12_var.get(), self.fitting_line_134_var.get()
+
+# Create root window for dialogs
+print("Initializing GUI...")
 root = Tk()
 root.withdraw()
-root.attributes('-topmost', True)
+
+# Show plot selection dialog
+try:
+    dialog = PlotSelectionDialog(root)
+    selected_plots, add_fitting_12, add_fitting_134 = dialog.show()
+except Exception as e:
+    print(f"Error creating dialog: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+
+if not selected_plots:
+    print("No plots selected. Exiting...")
+    root.destroy()
+    sys.exit(0)
+
+print(f"\n{len(selected_plots)} plots selected for generation.")
+print(f"Fitting lines enabled: Run1-2={add_fitting_12}, Run1-3-4={add_fitting_134}\n")
 
 # Ask user to select output folder
-print("\nPlease select the folder where you want to save the plots...")
-output_dir = filedialog.askdirectory(title="Select Output Folder for Plots")
+print("Opening folder selection dialog...")
+root.deiconify()
+root.lift()
+root.focus_force()
+root.withdraw()
+
+output_dir = filedialog.askdirectory(
+    title="Select Output Folder for Plots",
+    parent=root
+)
 
 if not output_dir:
     print("No folder selected. Exiting...")
-    exit()
+    root.destroy()
+    sys.exit(0)
 
 print(f"Plots will be saved to: {output_dir}\n")
 
@@ -41,42 +339,66 @@ print("Reading data file...")
 
 # Try reading with appropriate engine
 try:
-    if has_pyxlsb and file_path.endswith('.xlsb'):
+    if has_pyxlsb and file_path.endswith('.xlsb') and os.path.exists(file_path):
+        print(f"Reading {file_path}...")
         df = pd.read_excel(file_path, sheet_name=sheet_name, engine='pyxlsb', header=None)
+        print(f"Successfully loaded file with shape: {df.shape}")
     else:
         # Ask for alternative file if xlsb can't be read
         print("Please select the Excel file (.xlsx or .xlsb)...")
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+        root.withdraw()
+        
         file_path = filedialog.askopenfilename(
             title="Select Excel File",
-            filetypes=[("Excel files", "*.xlsx *.xlsb"), ("All files", "*.*")]
+            filetypes=[("Excel files", "*.xlsx *.xlsb"), ("All files", "*.*")],
+            parent=root
         )
         if not file_path:
             print("No file selected. Exiting...")
-            exit()
+            root.destroy()
+            sys.exit(0)
         
+        print(f"Reading {file_path}...")
         if file_path.endswith('.xlsb'):
             df = pd.read_excel(file_path, sheet_name=sheet_name, engine='pyxlsb', header=None)
         else:
             df = pd.read_excel(file_path, sheet_name=sheet_name, engine='openpyxl', header=None)
+        print(f"Successfully loaded file with shape: {df.shape}")
+        
 except Exception as e:
     print(f"Error reading file: {e}")
     print("\nTrying to open file selection dialog...")
+    
+    root.deiconify()
+    root.lift()
+    root.focus_force()
+    root.withdraw()
+    
     file_path = filedialog.askopenfilename(
         title="Select Excel File",
-        filetypes=[("Excel files", "*.xlsx *.xlsb"), ("All files", "*.*")]
+        filetypes=[("Excel files", "*.xlsx *.xlsb"), ("All files", "*.*")],
+        parent=root
     )
     if not file_path:
         print("No file selected. Exiting...")
-        exit()
+        root.destroy()
+        sys.exit(0)
     
+    print(f"Reading {file_path}...")
     if file_path.endswith('.xlsb'):
         df = pd.read_excel(file_path, sheet_name=sheet_name, engine='pyxlsb', header=None)
     else:
         df = pd.read_excel(file_path, sheet_name=sheet_name, engine='openpyxl', header=None)
+    print(f"Successfully loaded file with shape: {df.shape}")
 
-print(f"Successfully loaded: {os.path.basename(file_path)}\n")
+print(f"Successfully loaded: {os.path.basename(file_path)}")
+print(f"Data shape: {df.shape}\n")
 
 # Extract headers
+print("Processing headers...")
 header_row1 = df.iloc[0].fillna('')  # Test1, Test2, Test3, etc.
 header_row2 = df.iloc[1].fillna('')  # (Run1), (Run2), etc.
 
@@ -95,6 +417,9 @@ for i in range(len(header_row1)):
 # Start data from row 2 (index 2)
 df_data = df.iloc[2:].reset_index(drop=True)
 df_data.columns = [column_mapping[i] for i in range(len(df_data.columns))]
+
+print(f"Processed data shape: {df_data.shape}")
+print(f"Columns: {list(df_data.columns)[:5]}... (showing first 5)\n")
 
 # Define symbols for Test 1, 2, 3
 test_markers = {
@@ -115,29 +440,20 @@ run_colors = {
 runs = ['Run1', 'Run2', 'Run3', 'Run4']
 tests = ['Test1', 'Test2', 'Test3']
 
-# Parameters to plot
-# Format: (y_param_name, y_unit, x_param_name, x_unit, short_name_for_file, category_for_ylim)
-plot_params = [
-    # Original plots (y-axis vs Usable Capacity)
-    ('Energy Released by Cell to Max T_Cell_Avg', 'Wh', 'Usable Capacity', '%', 'Energy_Released_Cell_vs_UsableCapacity', 'energy'),
-    ('Maximum Cell Avg Temperature', '°C', 'Usable Capacity', '%', 'Max_Cell_Temperature_vs_UsableCapacity', 'temperature'),
-    ('Cell Avg Temperature at t=60 sec', '°C', 'Usable Capacity', '%', 'Cell_Temperature_60sec_vs_UsableCapacity', 'temperature'),
-    ('Maximum Pressure', 'PSIG', 'Usable Capacity', '%', 'Max_Pressure_vs_UsableCapacity', 'pressure'),
-    ('Pressure at t=60 sec', 'PSIG', 'Usable Capacity', '%', 'Pressure_60sec_vs_UsableCapacity', 'pressure'),
-    ('Cell specific Mass Loss', 'g', 'Usable Capacity', '%', 'Cell_Mass_Loss_vs_UsableCapacity', 'mass'),
-    ('Gas generation', 'g', 'Usable Capacity', '%', 'Gas_Generation_vs_UsableCapacity', 'gas'),
-    
-    # New plots (Total Energy Released vs various parameters)
-    ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Usable Capacity', '%', 'Total_Energy_Released_vs_UsableCapacity', 'total_energy'),
-    ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Cell specific Mass Loss', 'g', 'Total_Energy_Released_vs_Cell_Mass_Loss', 'total_energy'),
-    ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Maximum Pressure', 'PSIG', 'Total_Energy_Released_vs_Max_Pressure', 'total_energy'),
-]
+# Use only selected plots
+plot_params = selected_plots
 
 # Function to find row index for a parameter with specific unit
 def find_parameter_row(df_data, param_name, unit):
     for idx, row in df_data.iterrows():
         param = str(row['Parameter']).strip()
         unit_col = str(row['Unit']).strip()
+        
+        # Exact match first
+        if param == param_name and (unit in unit_col or unit_col == unit):
+            return idx
+        
+        # Partial match for parameters that might have slight variations
         if param_name in param and (unit in unit_col or unit_col == unit):
             return idx
     return None
@@ -174,18 +490,20 @@ def collect_data_points(df_data, y_param_name, y_unit, x_param_name, x_unit):
     
     return data_points
 
-print("Collecting data and determining y-axis limits...\n")
+print("Collecting data and determining y-axis limits...")
 
 # Collect data for temperature plots
 temp_data = []
-for y_param, y_unit, x_param, x_unit, file_name, category in plot_params:
+for plot in plot_params:
+    y_param, y_unit, x_param, x_unit, file_name, category, display_name = plot
     if category == 'temperature':
         points = collect_data_points(df_data, y_param, y_unit, x_param, x_unit)
         temp_data.extend([y for x, y, t, r in points])
 
 # Collect data for pressure plots
 pressure_data = []
-for y_param, y_unit, x_param, x_unit, file_name, category in plot_params:
+for plot in plot_params:
+    y_param, y_unit, x_param, x_unit, file_name, category, display_name = plot
     if category == 'pressure':
         points = collect_data_points(df_data, y_param, y_unit, x_param, x_unit)
         pressure_data.extend([y for x, y, t, r in points])
@@ -203,14 +521,26 @@ def calculate_ylim(data):
 temp_ylim = calculate_ylim(temp_data)
 pressure_ylim = calculate_ylim(pressure_data)
 
-print(f"Temperature y-limits: {temp_ylim}")
-print(f"Pressure y-limits: {pressure_ylim}\n")
+if temp_ylim[0] is not None:
+    print(f"Temperature y-limits: {temp_ylim}")
+if pressure_ylim[0] is not None:
+    print(f"Pressure y-limits: {pressure_ylim}")
+print()
 
-print("Generating scatter plots...\n")
+print("Generating scatter plots...")
+print("=" * 60)
+
+# Close matplotlib interactive mode to prevent hanging
+plt.ioff()
 
 # Create a figure for each parameter
 plot_count = 0
-for y_param_name, y_unit, x_param_name, x_unit, file_name, category in plot_params:
+skipped_count = 0
+for plot_idx, plot in enumerate(plot_params, start=1):
+    y_param_name, y_unit, x_param_name, x_unit, file_name, category, display_name = plot
+    
+    print(f"\nProcessing plot {plot_idx}/{len(plot_params)}: {display_name}")
+    
     # Create figure with 12x8 inch size
     fig, ax = plt.subplots(figsize=(12, 8))
     
@@ -219,15 +549,26 @@ for y_param_name, y_unit, x_param_name, x_unit, file_name, category in plot_para
     x_param_idx = find_parameter_row(df_data, x_param_name, x_unit)
     
     if y_param_idx is None:
-        print(f"⚠ Warning: Could not find parameter '{y_param_name}' with unit '{y_unit}'")
+        print(f"  ⚠ Warning: Could not find parameter '{y_param_name}' with unit '{y_unit}'")
+        skipped_count += 1
+        plt.close(fig)
         continue
     
     if x_param_idx is None:
-        print(f"⚠ Warning: Could not find parameter '{x_param_name}' with unit '{x_unit}'")
+        print(f"  ⚠ Warning: Could not find parameter '{x_param_name}' with unit '{x_unit}'")
+        skipped_count += 1
+        plt.close(fig)
         continue
     
     # Collect all data points for this parameter
     points_plotted = 0
+    
+    # Store data points by run for fitting lines
+    run_data = {'Run1': {'x': [], 'y': []}, 
+                'Run2': {'x': [], 'y': []}, 
+                'Run3': {'x': [], 'y': []}, 
+                'Run4': {'x': [], 'y': []}}
+    
     for run in runs:
         for test in tests:
             try:
@@ -254,23 +595,84 @@ for y_param_name, y_unit, x_param_name, x_unit, file_name, category in plot_para
                              s=150, 
                              alpha=0.7,
                              edgecolors='black',
-                             linewidth=1.5)
+                             linewidth=1.5,
+                             zorder=3)
                     points_plotted += 1
+                    
+                    # Store data for fitting lines
+                    run_data[run]['x'].append(x_val)
+                    run_data[run]['y'].append(y_val)
             except Exception as e:
-                print(f"⚠ Error processing {run} - {test} for {y_param_name}: {e}")
                 continue
     
     if points_plotted == 0:
-        print(f"⚠ No data points found for {y_param_name} vs {x_param_name}")
-        plt.close()
+        print(f"  ⚠ No data points found for {y_param_name} vs {x_param_name}")
+        skipped_count += 1
+        plt.close(fig)
         continue
+    
+    print(f"  Plotting {points_plotted} data points...")
+    
+    # Add fitting lines if requested
+    if add_fitting_12:
+        # Fitting line for Run1 and Run2
+        x_12 = run_data['Run1']['x'] + run_data['Run2']['x']
+        y_12 = run_data['Run1']['y'] + run_data['Run2']['y']
+        
+        if len(x_12) >= 2:
+            try:
+                slope, intercept, r_value, p_value, std_err = stats.linregress(x_12, y_12)
+                x_fit = np.array([min(x_12), max(x_12)])
+                y_fit = slope * x_fit + intercept
+                
+                ax.plot(x_fit, y_fit, 
+                       color='purple', 
+                       linestyle='--', 
+                       linewidth=2.5, 
+                       alpha=0.8,
+                       label=f'Fit Run1-2: y={slope:.3f}x+{intercept:.3f} (R²={r_value**2:.3f})',
+                       zorder=2)
+                print(f"  ✓ Added fitting line Run1-2: R²={r_value**2:.3f}")
+            except Exception as e:
+                print(f"  ⚠ Could not create fitting line Run1-2: {e}")
+    
+    if add_fitting_134:
+        # Fitting line for Run1, Run3, and Run4
+        x_134 = run_data['Run1']['x'] + run_data['Run3']['x'] + run_data['Run4']['x']
+        y_134 = run_data['Run1']['y'] + run_data['Run3']['y'] + run_data['Run4']['y']
+        
+        if len(x_134) >= 2:
+            try:
+                slope, intercept, r_value, p_value, std_err = stats.linregress(x_134, y_134)
+                x_fit = np.array([min(x_134), max(x_134)])
+                y_fit = slope * x_fit + intercept
+                
+                ax.plot(x_fit, y_fit, 
+                       color='brown', 
+                       linestyle='-.', 
+                       linewidth=2.5, 
+                       alpha=0.8,
+                       label=f'Fit Run1-3-4: y={slope:.3f}x+{intercept:.3f} (R²={r_value**2:.3f})',
+                       zorder=2)
+                print(f"  ✓ Added fitting line Run1-3-4: R²={r_value**2:.3f}")
+            except Exception as e:
+                print(f"  ⚠ Could not create fitting line Run1-3-4: {e}")
     
     # Customize plot
     ax.set_xlabel(f'{x_param_name} ({x_unit})', fontsize=14, fontweight='bold')
     ax.set_ylabel(f'{y_param_name} ({y_unit})', fontsize=14, fontweight='bold')
-    ax.set_title(f'{y_param_name} vs {x_param_name}\nEVESE C4 - Thermal Runaway Analysis', 
-                 fontsize=16, fontweight='bold', pad=20)
-    ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
+    
+    # Adjust title for long parameter names
+    title_text = f'{y_param_name} vs {x_param_name}'
+    if len(title_text) > 60:
+        # Split long titles into two lines
+        ax.set_title(f'{y_param_name}\nvs {x_param_name}\nEVESE C4 - Thermal Runaway Analysis', 
+                     fontsize=14, fontweight='bold', pad=20)
+    else:
+        ax.set_title(f'{title_text}\nEVESE C4 - Thermal Runaway Analysis', 
+                     fontsize=16, fontweight='bold', pad=20)
+    
+    ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8, zorder=1)
     
     # Set y-limits based on category
     if category == 'temperature' and temp_ylim[0] is not None:
@@ -280,7 +682,7 @@ for y_param_name, y_unit, x_param_name, x_unit, file_name, category in plot_para
     
     # Add minor gridlines
     ax.minorticks_on()
-    ax.grid(which='minor', alpha=0.15, linestyle=':', linewidth=0.5)
+    ax.grid(which='minor', alpha=0.15, linestyle=':', linewidth=0.5, zorder=1)
     
     # Create custom legend
     from matplotlib.lines import Line2D
@@ -303,22 +705,30 @@ for y_param_name, y_unit, x_param_name, x_unit, file_name, category in plot_para
     combined_legend_elements = run_legend_elements + test_legend_elements
     combined_labels = [run for run in runs] + [test for test in tests]
     
-    # Create single legend below the plot, centered, with two columns
+    # Add fitting line legend entries if they exist
+    if add_fitting_12 and len(x_12) >= 2:
+        combined_legend_elements.append(Line2D([0], [0], color='purple', linestyle='--', linewidth=2.5))
+        combined_labels.append('Fit: Run1-2')
+    
+    if add_fitting_134 and len(x_134) >= 2:
+        combined_legend_elements.append(Line2D([0], [0], color='brown', linestyle='-.', linewidth=2.5))
+        combined_labels.append('Fit: Run1-3-4')
+    
+    # Calculate number of columns for legend
+    ncol = 7 if not (add_fitting_12 or add_fitting_134) else 9
+    
+    # Create single legend below the plot, centered
     legend = ax.legend(handles=combined_legend_elements,
                       labels=combined_labels,
                       loc='upper center',
                       bbox_to_anchor=(0.5, -0.08),
-                      ncol=7,  # All items in one row (4 runs + 3 tests)
+                      ncol=ncol,
                       frameon=True,
                       framealpha=0.95,
                       edgecolor='black',
-                      fontsize=11,
+                      fontsize=10,
                       columnspacing=1.5,
                       handletextpad=0.5)
-    
-    # # Add separator line in legend title to distinguish runs from tests
-    # legend.set_title('Runs: Run1, Run2, Run3, Run4  |  Tests: Test1, Test2, Test3', 
-    #                 prop={'size': 10, 'weight': 'normal'})
     
     # Adjust layout to make room for legend below
     plt.subplots_adjust(bottom=0.15)
@@ -326,15 +736,23 @@ for y_param_name, y_unit, x_param_name, x_unit, file_name, category in plot_para
     # Save figure with descriptive name
     output_filename = f'{file_name}.png'
     output_path = os.path.join(output_dir, output_filename)
+    
+    print(f"  Saving to: {output_filename}")
     plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
     
     plot_count += 1
-    print(f"✓ Saved ({plot_count}/{len(plot_params)}): {output_filename} ({points_plotted} data points)")
+    print(f"  ✓ Saved successfully!")
     
     # Close figure to free memory
-    plt.close()
+    plt.close(fig)
 
 print(f"\n{'='*60}")
-print(f"SUCCESS! All {plot_count} scatter plots generated successfully!")
+print(f"SUCCESS! {plot_count} scatter plots generated successfully!")
+if skipped_count > 0:
+    print(f"⚠ Skipped {skipped_count} plots due to missing data or parameters")
 print(f"Location: {output_dir}")
 print(f"{'='*60}")
+
+# Close the root window
+root.destroy()
+print("\nScript completed successfully!")
