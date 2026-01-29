@@ -613,6 +613,9 @@ for plot_idx, plot in enumerate(plot_params, start=1):
     
     print(f"  Plotting {points_plotted} data points...")
     
+    # Store fitting line information for text display
+    fitting_equations = []
+    
     # Add fitting lines if requested
     if add_fitting_12:
         # Fitting line for Run1 and Run2
@@ -630,9 +633,18 @@ for plot_idx, plot in enumerate(plot_params, start=1):
                        linestyle='--', 
                        linewidth=2.5, 
                        alpha=0.8,
-                       label=f'Fit Run1-2: y={slope:.3f}x+{intercept:.3f} (R²={r_value**2:.3f})',
+                       label='Fit: Run1-2',
                        zorder=2)
-                print(f"  ✓ Added fitting line Run1-2: R²={r_value**2:.3f}")
+                
+                # Store equation for text display
+                sign = '+' if intercept >= 0 else ''
+                fitting_equations.append({
+                    'label': 'Run1-2',
+                    'equation': f'y = {slope:.4f}x {sign}{intercept:.4f}',
+                    'r_squared': f'R² = {r_value**2:.4f}',
+                    'color': 'purple'
+                })
+                print(f"  ✓ Added fitting line Run1-2: R²={r_value**2:.4f}")
             except Exception as e:
                 print(f"  ⚠ Could not create fitting line Run1-2: {e}")
     
@@ -652,9 +664,18 @@ for plot_idx, plot in enumerate(plot_params, start=1):
                        linestyle='-.', 
                        linewidth=2.5, 
                        alpha=0.8,
-                       label=f'Fit Run1-3-4: y={slope:.3f}x+{intercept:.3f} (R²={r_value**2:.3f})',
+                       label='Fit: Run1-3-4',
                        zorder=2)
-                print(f"  ✓ Added fitting line Run1-3-4: R²={r_value**2:.3f}")
+                
+                # Store equation for text display
+                sign = '+' if intercept >= 0 else ''
+                fitting_equations.append({
+                    'label': 'Run1-3-4',
+                    'equation': f'y = {slope:.4f}x {sign}{intercept:.4f}',
+                    'r_squared': f'R² = {r_value**2:.4f}',
+                    'color': 'brown'
+                })
+                print(f"  ✓ Added fitting line Run1-3-4: R²={r_value**2:.4f}")
             except Exception as e:
                 print(f"  ⚠ Could not create fitting line Run1-3-4: {e}")
     
@@ -730,8 +751,27 @@ for plot_idx, plot in enumerate(plot_params, start=1):
                       columnspacing=1.5,
                       handletextpad=0.5)
     
-    # Adjust layout to make room for legend below
-    plt.subplots_adjust(bottom=0.15)
+    # Add fitting equations below the legend with minimal spacing
+    if fitting_equations:
+        # Get legend bounding box in figure coordinates
+        fig.canvas.draw()
+        legend_bbox = legend.get_window_extent().transformed(fig.transFigure.inverted())
+        
+        # Start equations just below the legend with very minimal gap
+        equation_y = legend_bbox.y0 - 0.015  # Reduced from 0.015 to 0.008
+        
+        for eq_info in fitting_equations:
+            equation_text = f"{eq_info['label']}: {eq_info['equation']},  {eq_info['r_squared']}"
+            fig.text(0.5, equation_y, equation_text,
+                    ha='center', va='top',
+                    fontsize=11, color=eq_info['color'],
+                    fontweight='bold',
+                    transform=fig.transFigure)
+            equation_y -= 0.022  # Spacing between multiple equations (reduced from 0.020 to 0.018)
+    
+    # Adjust layout to make room for legend and equations below
+    bottom_margin = 0.08 if not fitting_equations else 0.08 + (len(fitting_equations) * 0.022)
+    plt.subplots_adjust(bottom=bottom_margin)
     
     # Save figure with descriptive name
     output_filename = f'{file_name}.png'
