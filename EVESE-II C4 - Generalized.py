@@ -119,8 +119,14 @@ def select_channels_dialog(available_channels, dialog_title, instruction_text):
         var = tk.BooleanVar(value=False)  # Default: none selected
         checkbox_vars[channel] = var
         
-        # Create a more readable display name
-        display_name = channel.replace('/RTAC Data/', '').strip()
+        # Create a more readable display name - remove common prefixes
+        display_name = channel
+        prefixes_to_remove = ['/RTAC Data/', 'RTAC Data/', '/']
+        for prefix in prefixes_to_remove:
+            if display_name.startswith(prefix):
+                display_name = display_name[len(prefix):]
+                break
+        display_name = display_name.strip()
         
         cb = tk.Checkbutton(scrollable_frame, text=display_name, variable=var, 
                            font=('Arial', 9), anchor='w', wraplength=500, justify='left')
@@ -238,10 +244,33 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
             print("!!WARNING!! - No channels selected for T_Gas_Avg. Skipping analysis.")
             return
         
-        # Check if pressure column exists
-        pressure_column = '/RTAC Data/1000 Pressure'
-        if pressure_column not in main_data.columns:
-            print(f"!!ERROR!! - Pressure column '{pressure_column}' not found. Cannot calculate gas properties.")
+        # Check if pressure column exists - try multiple possible names
+        pressure_column = None
+        possible_pressure_names = [
+            '/RTAC Data/1000 Pressure',
+            '1000 Pressure',
+            'Pressure',
+            '/RTAC Data/Pressure'
+        ]
+        
+        for col_name in possible_pressure_names:
+            if col_name in main_data.columns:
+                pressure_column = col_name
+                print(f"✓ Found pressure column: '{pressure_column}'")
+                break
+        
+        if pressure_column is None:
+            # Try fuzzy search - look for any column containing "Pressure"
+            for col in main_data.columns:
+                if 'Pressure' in col or 'pressure' in col:
+                    pressure_column = col
+                    print(f"✓ Found pressure column: '{pressure_column}'")
+                    break
+        
+        if pressure_column is None:
+            print(f"!!ERROR!! - No pressure column found. Cannot calculate gas properties.")
+            print(f"  Looked for: {possible_pressure_names}")
+            print(f"  Available columns: {list(main_data.columns)}")
             return
         
         # Create Q_gen Analysis DataFrame
@@ -904,7 +933,15 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         
         # Add channel names to report
         for idx, tc in enumerate(selected_cell_tcs, start=1):
-            tc_name = tc.replace('/RTAC Data/', '').strip()
+            # Clean up display name - remove common prefixes
+            tc_name = tc
+            prefixes_to_remove = ['/RTAC Data/', 'RTAC Data/', '/']
+            for prefix in prefixes_to_remove:
+                if tc_name.startswith(prefix):
+                    tc_name = tc_name[len(prefix):]
+                    break
+            tc_name = tc_name.strip()
+            
             new_row = pd.DataFrame({
                 'Parameter': [f'  Channel {idx}'],
                 'Value': [tc_name],
@@ -924,7 +961,15 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         report_df = pd.concat([report_df, gas_row], ignore_index=True)
         
         for idx, tc in enumerate(selected_gas_tcs, start=1):
-            tc_name = tc.replace('/RTAC Data/', '').strip()
+            # Clean up display name - remove common prefixes
+            tc_name = tc
+            prefixes_to_remove = ['/RTAC Data/', 'RTAC Data/', '/']
+            for prefix in prefixes_to_remove:
+                if tc_name.startswith(prefix):
+                    tc_name = tc_name[len(prefix):]
+                    break
+            tc_name = tc_name.strip()
+            
             new_row = pd.DataFrame({
                 'Parameter': [f'  Channel {idx}'],
                 'Value': [tc_name],
@@ -948,12 +993,26 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         print(f"✓ Original CSV location: {csv_file}")
         print(f"\n✓ T_Cell_Avg calculated using {len(selected_cell_tcs)} channels:")
         for tc in selected_cell_tcs:
-            tc_name = tc.replace('/RTAC Data/', '').strip()
+            # Clean up display name
+            tc_name = tc
+            prefixes_to_remove = ['/RTAC Data/', 'RTAC Data/', '/']
+            for prefix in prefixes_to_remove:
+                if tc_name.startswith(prefix):
+                    tc_name = tc_name[len(prefix):]
+                    break
+            tc_name = tc_name.strip()
             print(f"  - {tc_name}")
         
         print(f"\n✓ T_Gas_Avg calculated using {len(selected_gas_tcs)} channels:")
         for tc in selected_gas_tcs:
-            tc_name = tc.replace('/RTAC Data/', '').strip()
+            # Clean up display name
+            tc_name = tc
+            prefixes_to_remove = ['/RTAC Data/', 'RTAC Data/', '/']
+            for prefix in prefixes_to_remove:
+                if tc_name.startswith(prefix):
+                    tc_name = tc_name[len(prefix):]
+                    break
+            tc_name = tc_name.strip()
             print(f"  - {tc_name}")
         
         return qgen_df
