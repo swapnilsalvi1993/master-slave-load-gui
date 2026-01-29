@@ -66,21 +66,23 @@ def get_temperature_columns(data):
 def select_channels_dialog(available_channels, dialog_title, instruction_text):
     """
     Opens a dialog box for selecting channels from a list of available channels.
-    Returns a list of selected channel names.
+    Includes weight input boxes for weighted average calculation.
+    Returns a tuple: (list of selected channel names, dictionary of weights)
     """
     if not available_channels:
         messagebox.showwarning("No Channels", "No temperature channels found in the data!")
-        return []
+        return [], {}
     
     selected_channels = []
+    channel_weights = {}
     
     # Create dialog window
     dialog = tk.Toplevel()
     dialog.title(dialog_title)
     
     # Set window size based on number of channels
-    window_height = min(500, 200 + len(available_channels) * 25)
-    dialog.geometry(f"600x{window_height}")
+    window_height = min(600, 250 + len(available_channels) * 30)
+    dialog.geometry(f"700x{window_height}")
     dialog.resizable(False, True)
     
     # Make it modal
@@ -89,8 +91,20 @@ def select_channels_dialog(available_channels, dialog_title, instruction_text):
     
     # Instruction label
     instruction = tk.Label(dialog, text=instruction_text, 
-                          font=('Arial', 10, 'bold'), pady=10, wraplength=550)
+                          font=('Arial', 10, 'bold'), pady=5, wraplength=650)
     instruction.pack()
+    
+    # Weight instruction label
+    weight_instruction = tk.Label(dialog, 
+                                  text="Enter weights for selected channels (must sum to 100%)", 
+                                  font=('Arial', 9), pady=5, fg='blue')
+    weight_instruction.pack()
+    
+    # Sum label
+    sum_label_var = tk.StringVar(value="Total Weight: 0.0%")
+    sum_label = tk.Label(dialog, textvariable=sum_label_var, 
+                        font=('Arial', 9, 'bold'), pady=5, fg='red')
+    sum_label.pack()
     
     # Create a frame with scrollbar for checkboxes
     canvas_frame = tk.Frame(dialog)
@@ -111,13 +125,69 @@ def select_channels_dialog(available_channels, dialog_title, instruction_text):
     canvas.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
     
-    # Dictionary to store checkbox variables
+    # Dictionary to store checkbox variables and weight entries
     checkbox_vars = {}
+    weight_entries = {}
+    weight_vars = {}
     
-    # Create checkboxes for each channel
+    def update_weights():
+        """Automatically distribute weights equally among selected channels"""
+        selected = [col for col, var in checkbox_vars.items() if var.get()]
+        
+        if len(selected) > 0:
+            equal_weight = 100.0 / len(selected)
+            
+            for channel in available_channels:
+                if channel in selected:
+                    weight_vars[channel].set(f"{equal_weight:.2f}")
+                else:
+                    weight_vars[channel].set("0.00")
+        else:
+            for channel in available_channels:
+                weight_vars[channel].set("0.00")
+        
+        update_sum()
+    
+    def update_sum(*args):
+        """Update the sum of weights and enable/disable confirm button"""
+        total = 0.0
+        try:
+            for channel, var in weight_vars.items():
+                if checkbox_vars[channel].get():  # Only sum selected channels
+                    val = var.get().strip()
+                    if val:
+                        total += float(val)
+        except ValueError:
+            total = 0.0
+        
+        sum_label_var.set(f"Total Weight: {total:.2f}%")
+        
+        # Enable/disable confirm button based on sum
+        if abs(total - 100.0) < 0.01:  # Allow small floating point error
+            sum_label.config(fg='green')
+            confirm_btn.config(state='normal')
+        else:
+            sum_label.config(fg='red')
+            confirm_btn.config(state='disabled')
+    
+    def on_checkbox_change(channel):
+        """Handle checkbox state change"""
+        update_weights()
+    
+    # Create checkboxes and weight entries for each channel
     for channel in available_channels:
-        var = tk.BooleanVar(value=False)  # Default: none selected
+        # Create frame for each row
+        row_frame = tk.Frame(scrollable_frame)
+        row_frame.pack(fill='x', padx=5, pady=2)
+        
+        # Checkbox variable
+        var = tk.BooleanVar(value=False)
         checkbox_vars[channel] = var
+        
+        # Weight variable
+        weight_var = tk.StringVar(value="0.00")
+        weight_vars[channel] = weight_var
+        weight_var.trace_add('write', update_sum)
         
         # Create a more readable display name - remove common prefixes
         display_name = channel
@@ -128,9 +198,16 @@ def select_channels_dialog(available_channels, dialog_title, instruction_text):
                 break
         display_name = display_name.strip()
         
-        cb = tk.Checkbutton(scrollable_frame, text=display_name, variable=var, 
-                           font=('Arial', 9), anchor='w', wraplength=500, justify='left')
-        cb.pack(fill='x', padx=10, pady=2)
+        # Weight entry (left side)
+        weight_entry = tk.Entry(row_frame, textvariable=weight_var, width=8, justify='center')
+        weight_entry.pack(side='left', padx=(0, 10))
+        weight_entries[channel] = weight_entry
+        
+        # Checkbox with channel name
+        cb = tk.Checkbutton(row_frame, text=display_name, variable=var, 
+                           font=('Arial', 9), anchor='w', wraplength=500, justify='left',
+                           command=lambda ch=channel: on_checkbox_change(ch))
+        cb.pack(side='left', fill='x', expand=True)
     
     # Frame for buttons
     button_frame = tk.Frame(dialog)
@@ -139,17 +216,37 @@ def select_channels_dialog(available_channels, dialog_title, instruction_text):
     def select_all():
         for var in checkbox_vars.values():
             var.set(True)
+        update_weights()
     
     def deselect_all():
         for var in checkbox_vars.values():
             var.set(False)
+        update_weights()
     
     def confirm_selection():
         selected = [col for col, var in checkbox_vars.items() if var.get()]
         if len(selected) == 0:
             messagebox.showwarning("No Selection", "Please select at least one channel!")
             return
+        
+        # Collect weights
+        weights = {}
+        total = 0.0
+        try:
+            for channel in selected:
+                weight = float(weight_vars[channel].get())
+                weights[channel] = weight
+                total += weight
+        except ValueError:
+            messagebox.showerror("Invalid Weight", "Please enter valid numbers for weights!")
+            return
+        
+        if abs(total - 100.0) > 0.01:
+            messagebox.showerror("Weight Sum Error", f"Total weight must equal 100%!\nCurrent total: {total:.2f}%")
+            return
+        
         selected_channels.extend(selected)
+        channel_weights.update(weights)
         dialog.destroy()
     
     def cancel_selection():
@@ -167,13 +264,14 @@ def select_channels_dialog(available_channels, dialog_title, instruction_text):
     cancel_btn.grid(row=1, column=0, pady=10, padx=5)
     
     confirm_btn = tk.Button(button_frame, text="Confirm", command=confirm_selection, 
-                           width=12, bg='#4CAF50', fg='white', font=('Arial', 9, 'bold'))
+                           width=12, bg='#4CAF50', fg='white', font=('Arial', 9, 'bold'),
+                           state='disabled')  # Initially disabled
     confirm_btn.grid(row=1, column=1, pady=10, padx=5)
     
     # Wait for dialog to close
     dialog.wait_window()
     
-    return selected_channels
+    return selected_channels, channel_weights
 
 def create_qgen_analysis(csv_file, main_data, output_directory):
     """
@@ -222,10 +320,10 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         
         # Select channels for T_Cell_Avg
         print("\n--- Selecting channels for T_Cell_Avg calculation ---")
-        selected_cell_tcs = select_channels_dialog(
+        selected_cell_tcs, cell_weights = select_channels_dialog(
             temp_columns,
-            "Select Channels for T_Cell_Avg",
-            "Select temperature channels to include in T_Cell_Avg calculation:"
+            "Select Channels for T_Cell_Avg (Weighted Average)",
+            "Select temperature channels and assign weights for T_Cell_Avg calculation:"
         )
         
         if not selected_cell_tcs:
@@ -234,10 +332,10 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         
         # Select channels for T_Gas_Avg
         print("\n--- Selecting channels for T_Gas_Avg calculation ---")
-        selected_gas_tcs = select_channels_dialog(
+        selected_gas_tcs, gas_weights = select_channels_dialog(
             temp_columns,
-            "Select Channels for T_Gas_Avg",
-            "Select temperature channels to include in T_Gas_Avg calculation:"
+            "Select Channels for T_Gas_Avg (Weighted Average)",
+            "Select temperature channels and assign weights for T_Gas_Avg calculation:"
         )
         
         if not selected_gas_tcs:
@@ -283,9 +381,15 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         if has_time_hour:
             qgen_df['Time (hour)'] = main_data['Time (hour)']
         
-        # Calculate T_Cell_Avg from selected thermocouples
+        # Calculate T_Cell_Avg from selected thermocouples using WEIGHTED AVERAGE
         tc_data = main_data[selected_cell_tcs]
-        qgen_df['T_Cell_Avg'] = tc_data.mean(axis=1).round(3)
+        
+        # Apply weights (convert percentages to fractions)
+        weighted_sum = pd.Series(0.0, index=tc_data.index)
+        for col in selected_cell_tcs:
+            weighted_sum += tc_data[col] * (cell_weights[col] / 100.0)
+        
+        qgen_df['T_Cell_Avg'] = weighted_sum.round(3)
         
         # Apply bounds checking: 0 < T_Cell_Avg < 1000
         # Replace out-of-bounds values with previous valid value
@@ -301,13 +405,19 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
             print(f"⚠ Warning: {out_of_bounds_count} out-of-bounds T_Cell_Avg values detected (not in range 0-1000°C)")
             print(f"  These values were replaced with the previous valid value.")
         
-        # Calculate T_Gas_Avg from gas thermocouples
+        # Calculate T_Gas_Avg from gas thermocouples using WEIGHTED AVERAGE
         gas_tc_data = main_data[selected_gas_tcs]
-        qgen_df['T_Gas_Avg'] = gas_tc_data.mean(axis=1).round(3)
+        
+        # Apply weights (convert percentages to fractions)
+        weighted_gas_sum = pd.Series(0.0, index=gas_tc_data.index)
+        for col in selected_gas_tcs:
+            weighted_gas_sum += gas_tc_data[col] * (gas_weights[col] / 100.0)
+        
+        qgen_df['T_Gas_Avg'] = weighted_gas_sum.round(3)
         
         # Apply bounds checking: 0 < T_Gas_Avg < 1000
         # Replace out-of-bounds values with previous valid value
-        valid_gas_mask = (qgen_df['T_Gas_Avg'] > 0) & (qgen_df['T_Gas_Avg'] < 1000)
+        valid_gas_mask = (qgen_df['T_Gas_Avg'] > 0) &   (qgen_df['T_Gas_Avg'] < 1000)
         
         # Forward fill: repeat previous valid value for out-of-bounds entries
         qgen_df.loc[~valid_gas_mask, 'T_Gas_Avg'] = None
@@ -931,9 +1041,9 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         
         report_df = pd.DataFrame(report_data)
         
-        # Add channel names to report
+        # Add channel names and weights to report
         for idx, tc in enumerate(selected_cell_tcs, start=1):
-            # Clean up display name - remove common prefixes
+            # Clean up display name
             tc_name = tc
             prefixes_to_remove = ['/RTAC Data/', 'RTAC Data/', '/']
             for prefix in prefixes_to_remove:
@@ -944,7 +1054,7 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
             
             new_row = pd.DataFrame({
                 'Parameter': [f'  Channel {idx}'],
-                'Value': [tc_name],
+                'Value': [f"{tc_name} (Weight: {cell_weights[tc]:.2f}%)"],
                 'Unit': ['']
             })
             report_df = pd.concat([report_df, new_row], ignore_index=True)
@@ -961,7 +1071,7 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         report_df = pd.concat([report_df, gas_row], ignore_index=True)
         
         for idx, tc in enumerate(selected_gas_tcs, start=1):
-            # Clean up display name - remove common prefixes
+            # Clean up display name
             tc_name = tc
             prefixes_to_remove = ['/RTAC Data/', 'RTAC Data/', '/']
             for prefix in prefixes_to_remove:
@@ -972,7 +1082,7 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
             
             new_row = pd.DataFrame({
                 'Parameter': [f'  Channel {idx}'],
-                'Value': [tc_name],
+                'Value': [f"{tc_name} (Weight: {gas_weights[tc]:.2f}%)"],
                 'Unit': ['']
             })
             report_df = pd.concat([report_df, new_row], ignore_index=True)
@@ -991,7 +1101,7 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
         print(f"✓ Report sheet created successfully!")
         print(f"✓ File saved as: {excel_file}")
         print(f"✓ Original CSV location: {csv_file}")
-        print(f"\n✓ T_Cell_Avg calculated using {len(selected_cell_tcs)} channels:")
+        print(f"\n✓ T_Cell_Avg calculated using {len(selected_cell_tcs)} channels (weighted average):")
         for tc in selected_cell_tcs:
             # Clean up display name
             tc_name = tc
@@ -1001,9 +1111,9 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
                     tc_name = tc_name[len(prefix):]
                     break
             tc_name = tc_name.strip()
-            print(f"  - {tc_name}")
+            print(f"  - {tc_name}: {cell_weights[tc]:.2f}%")
         
-        print(f"\n✓ T_Gas_Avg calculated using {len(selected_gas_tcs)} channels:")
+        print(f"\n✓ T_Gas_Avg calculated using {len(selected_gas_tcs)} channels (weighted average):")
         for tc in selected_gas_tcs:
             # Clean up display name
             tc_name = tc
@@ -1013,7 +1123,7 @@ def create_qgen_analysis(csv_file, main_data, output_directory):
                     tc_name = tc_name[len(prefix):]
                     break
             tc_name = tc_name.strip()
-            print(f"  - {tc_name}")
+            print(f"  - {tc_name}: {gas_weights[tc]:.2f}%")
         
         return qgen_df
         
