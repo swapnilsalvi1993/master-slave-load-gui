@@ -37,10 +37,14 @@ ALL_PLOT_PARAMS = {
         ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Usable Capacity', '%', 'Total_Energy_Released_vs_UsableCapacity', 'total_energy', 'Total Energy Released vs Usable Capacity'),
         ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Cell specific Mass Loss', 'g', 'Total_Energy_Released_vs_Cell_Mass_Loss', 'total_energy', 'Total Energy Released vs Cell Mass Loss'),
         ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Maximum Pressure', 'PSIG', 'Total_Energy_Released_vs_Max_Pressure', 'total_energy', 'Total Energy Released vs Maximum Pressure'),
+        ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Cell Carcass Mass', 'g', 'Total_Energy_Released_vs_Cell_Carcass_Mass', 'total_energy', 'Total Energy Released vs Cell Carcass Mass'),
+        ('Total Energy Released to Max T_Cell_Avg', 'Wh', 'Particulate Mass', 'g', 'Total_Energy_Released_vs_Particulate_Mass', 'total_energy', 'Total Energy Released vs Particulate Mass'),
     ],
     
     'Mass & Gas Generation': [
         ('Cell specific Mass Loss', 'g', 'Usable Capacity', '%', 'Cell_Mass_Loss_vs_UsableCapacity', 'mass', 'Cell specific Mass Loss vs Usable Capacity'),
+        ('Cell Carcass Mass', 'g', 'Usable Capacity', '%', 'Cell_Carcass_Mass_vs_UsableCapacity', 'mass', 'Cell Carcass Mass vs Usable Capacity'),
+        ('Particulate Mass', 'g', 'Usable Capacity', '%', 'Particulate_Mass_vs_UsableCapacity', 'mass', 'Particulate Mass vs Usable Capacity'),
         ('Gas generation', 'g', 'Usable Capacity', '%', 'Gas_Generation_vs_UsableCapacity', 'gas', 'Gas Generation vs Usable Capacity'),
         ('Gas rate', 'mmol/Wh', 'Usable Capacity', '%', 'Gas_Rate_mmol_Wh_vs_UsableCapacity', 'gas_rate', 'Gas Rate (mmol/Wh) vs Usable Capacity'),
         ('Gas rate', 'sL/kWh', 'Usable Capacity', '%', 'Gas_Rate_sL_kWh_vs_UsableCapacity', 'gas_rate', 'Gas Rate (sL/kWh) vs Usable Capacity'),
