@@ -21,6 +21,7 @@ class TDMSMatcher:
         self.tdms_folder_path = tdms_folder_path
         self.summary_df = None
         self.tdms_data_combined = None
+        self.group_name = None  # Store the actual group name
         
     def read_summary_csv(self):
         """Read the summary CSV file"""
@@ -104,6 +105,29 @@ class TDMSMatcher:
         
         return range_start <= tdms_datetime <= range_end
     
+    def find_data_group(self, tdms_file):
+        """
+        Find the group that contains the actual data
+        
+        Args:
+            tdms_file: TdmsFile object
+            
+        Returns:
+            Group name or None
+        """
+        groups = tdms_file.groups()
+        
+        # Try to find a group with channels (not Root)
+        for group in groups:
+            group_name = group.name
+            if group_name and group_name.lower() != 'root':
+                # Check if this group has channels
+                if len(group.channels()) > 0:
+                    print(f"  Found data group: '{group_name}' with {len(group.channels())} channels")
+                    return group_name
+        
+        return None
+    
     def read_tdms_file(self, tdms_file_path, channels_needed):
         """
         Read TDMS file and extract specific channels
@@ -117,7 +141,15 @@ class TDMSMatcher:
         """
         try:
             tdms_file = TdmsFile.read(tdms_file_path)
-            group = tdms_file['Untitled']
+            
+            # Find the data group if not already set
+            if self.group_name is None:
+                self.group_name = self.find_data_group(tdms_file)
+                if self.group_name is None:
+                    print(f"  Error: No data group found in {os.path.basename(tdms_file_path)}")
+                    return None
+            
+            group = tdms_file[self.group_name]
             
             data_dict = {}
             
@@ -322,17 +354,19 @@ class TDMSMatcherGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("TDMS Data Matcher")
-        self.root.geometry("700x600")
+        self.root.geometry("700x650")
         self.root.resizable(False, False)
         
         # Variables
         self.csv_path = tk.StringVar()
         self.tdms_folder = tk.StringVar()
-        self.tdms_channel = tk.StringVar(value="9211_6 TC2 T19 (C)")
+        self.tdms_channel = tk.StringVar()
         self.new_column_name = tk.StringVar(value="T19_Cooling (°C)")
         self.tolerance = tk.IntVar(value=60)
         self.output_path = tk.StringVar()
         
+        self.available_channels = []
+        self.group_name = None
         self.matcher = None
         
         self.setup_ui()
@@ -368,20 +402,46 @@ class TDMSMatcherGUI:
         tdms_frame = tk.LabelFrame(main_frame, text="2. Select TDMS Folder", font=("Arial", 10, "bold"), padx=10, pady=10)
         tdms_frame.pack(fill=tk.X, pady=(0, 10))
         
-        tk.Entry(tdms_frame, textvariable=self.tdms_folder, width=60, state='readonly').pack(side=tk.LEFT, padx=(0, 10))
-        tk.Button(tdms_frame, text="Browse...", command=self.browse_folder, width=12).pack(side=tk.LEFT)
+        folder_entry_frame = tk.Frame(tdms_frame)
+        folder_entry_frame.pack(fill=tk.X)
+        
+        tk.Entry(folder_entry_frame, textvariable=self.tdms_folder, width=60, state='readonly').pack(side=tk.LEFT, padx=(0, 10))
+        tk.Button(folder_entry_frame, text="Browse...", command=self.browse_folder, width=12).pack(side=tk.LEFT)
+        
+        # Load channels button (appears after folder selection)
+        self.load_channels_button = tk.Button(
+            tdms_frame, 
+            text="⟳ Load Available Channels", 
+            command=self.load_channels,
+            state=tk.DISABLED,
+            bg="#3498db",
+            fg="white",
+            font=("Arial", 9, "bold")
+        )
+        self.load_channels_button.pack(pady=(10, 0))
         
         # Configuration Frame
         config_frame = tk.LabelFrame(main_frame, text="3. Configuration", font=("Arial", 10, "bold"), padx=10, pady=10)
         config_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # TDMS Channel
+        # TDMS Channel Dropdown
         tk.Label(config_frame, text="TDMS Channel:", anchor='w').grid(row=0, column=0, sticky='w', pady=5)
-        tk.Entry(config_frame, textvariable=self.tdms_channel, width=40).grid(row=0, column=1, sticky='w', padx=10, pady=5)
+        channel_frame = tk.Frame(config_frame)
+        channel_frame.grid(row=0, column=1, sticky='w', padx=10, pady=5)
+        
+        self.channel_dropdown = ttk.Combobox(
+            channel_frame, 
+            textvariable=self.tdms_channel, 
+            width=45,
+            state='readonly'
+        )
+        self.channel_dropdown.pack(side=tk.LEFT)
+        self.channel_dropdown['values'] = ["Select TDMS folder first..."]
+        self.channel_dropdown.current(0)
         
         # New Column Name
         tk.Label(config_frame, text="New Column Name:", anchor='w').grid(row=1, column=0, sticky='w', pady=5)
-        tk.Entry(config_frame, textvariable=self.new_column_name, width=40).grid(row=1, column=1, sticky='w', padx=10, pady=5)
+        tk.Entry(config_frame, textvariable=self.new_column_name, width=47).grid(row=1, column=1, sticky='w', padx=10, pady=5)
         
         # Tolerance
         tk.Label(config_frame, text="Tolerance (seconds):", anchor='w').grid(row=2, column=0, sticky='w', pady=5)
@@ -428,7 +488,7 @@ class TDMSMatcherGUI:
         status_frame = tk.LabelFrame(main_frame, text="Status", font=("Arial", 10, "bold"))
         status_frame.pack(fill=tk.BOTH, expand=True)
         
-        self.status_text = tk.Text(status_frame, height=8, wrap=tk.WORD)
+        self.status_text = tk.Text(status_frame, height=6, wrap=tk.WORD)
         self.status_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         scrollbar = tk.Scrollbar(self.status_text)
@@ -457,6 +517,77 @@ class TDMSMatcherGUI:
             tdms_count = len(glob.glob(os.path.join(folder, "*.tdms")))
             self.log_status(f"TDMS folder selected: {tdms_count} TDMS files found")
             
+            # Enable the load channels button
+            self.load_channels_button.config(state=tk.NORMAL)
+            self.log_status("Click 'Load Available Channels' to read channel list")
+            
+    def load_channels(self):
+        """Load channel names from a TDMS file"""
+        tdms_files = glob.glob(os.path.join(self.tdms_folder.get(), "*.tdms"))
+        
+        if not tdms_files:
+            messagebox.showerror("Error", "No TDMS files found in the selected folder!")
+            return
+        
+        self.log_status(f"Reading channels from {os.path.basename(tdms_files[0])}...")
+        
+        try:
+            # Read the first TDMS file to get channel names
+            tdms_file = TdmsFile.read(tdms_files[0])
+            
+            # List all groups
+            groups = tdms_file.groups()
+            self.log_status(f"Found {len(groups)} group(s) in TDMS file")
+            
+            # Find a group with channels (not Root)
+            data_group = None
+            for group in groups:
+                group_name = group.name
+                self.log_status(f"  Group: '{group_name}' ({len(group.channels())} channels)")
+                
+                if group_name and group_name.lower() != 'root' and len(group.channels()) > 0:
+                    data_group = group
+                    self.group_name = group_name
+                    break
+            
+            if data_group is None:
+                messagebox.showerror("Error", "No data group with channels found in TDMS file!")
+                return
+            
+            # Get all channel names
+            self.available_channels = [channel.name for channel in data_group.channels()]
+            
+            # Filter out the datetime channel for cleaner list
+            display_channels = [ch for ch in self.available_channels if 'Date/Time' not in ch]
+            
+            if display_channels:
+                self.channel_dropdown['values'] = display_channels
+                
+                # Try to set default to T19 channel if available
+                default_channel = None
+                for ch in display_channels:
+                    if 'T19' in ch or '9211_6 TC2' in ch:
+                        default_channel = ch
+                        break
+                
+                if default_channel:
+                    self.channel_dropdown.set(default_channel)
+                    self.new_column_name.set("T19_Cooling (°C)")
+                else:
+                    self.channel_dropdown.current(0)
+                
+                self.log_status(f"✓ Found {len(display_channels)} data channels in group '{self.group_name}'")
+                messagebox.showinfo(
+                    "Success", 
+                    f"Loaded {len(display_channels)} channels from TDMS file!\n\nGroup: '{self.group_name}'\n\nSelect a channel from the dropdown."
+                )
+            else:
+                messagebox.showerror("Error", "No data channels found in TDMS file!")
+                
+        except Exception as e:
+            self.log_status(f"✗ Error loading channels: {str(e)}")
+            messagebox.showerror("Error", f"Could not read TDMS file:\n\n{str(e)}")
+    
     def browse_output(self):
         """Open file dialog to select output location"""
         filename = filedialog.asksaveasfilename(
@@ -492,8 +623,8 @@ class TDMSMatcherGUI:
             messagebox.showerror("Error", "TDMS folder does not exist!")
             return False
         
-        if not self.tdms_channel.get():
-            messagebox.showerror("Error", "Please enter a TDMS channel name!")
+        if not self.tdms_channel.get() or self.tdms_channel.get() == "Select TDMS folder first...":
+            messagebox.showerror("Error", "Please select a TDMS channel!\n\nClick 'Load Available Channels' first.")
             return False
         
         if not self.new_column_name.get():
@@ -518,6 +649,9 @@ class TDMSMatcherGUI:
                 self.csv_path.get(),
                 self.tdms_folder.get()
             )
+            
+            # Set the group name from GUI
+            self.matcher.group_name = self.group_name
             
             # Match and add data
             self.log_status(f"Channel: {self.tdms_channel.get()}")
