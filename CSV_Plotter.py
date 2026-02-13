@@ -509,11 +509,88 @@ class CSVPlotter:
         ttk.Label(save_frame, text="Select PNG Quality (DPI):").pack(side="left")
         self.dpi_option = ttk.Combobox(save_frame, values=[100,150,200,300,600], state="readonly"); self.dpi_option.current(2); self.dpi_option.pack(side="left", padx=5)
         ttk.Button(save_frame, text="Save PNG", command=self.save_png).pack(side="left", padx=5)
+
+        # Progress Bar and Status Window
+        progress_frame = ttk.LabelFrame(self.preview_parent, text="Progress & Status")
+        progress_frame.pack(pady=5, fill="both", expand=False)
         
+        # Progress bar
+        progress_bar_frame = ttk.Frame(progress_frame)
+        progress_bar_frame.pack(fill="x", padx=5, pady=5)
+        ttk.Label(progress_bar_frame, text="Progress:").pack(side="left", padx=(0,5))
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(progress_bar_frame, variable=self.progress_var, 
+                                           maximum=100, mode='determinate', length=400)
+        self.progress_bar.pack(side="left", fill="x", expand=True, padx=5)
+        self.progress_label = ttk.Label(progress_bar_frame, text="0%", width=8)
+        self.progress_label.pack(side="left", padx=(5,0))
+        
+        # Status window (text widget with scrollbar)
+        status_label_frame = ttk.Frame(progress_frame)
+        status_label_frame.pack(fill="both", expand=True, padx=5, pady=(0,5))
+        ttk.Label(status_label_frame, text="Status Log:").pack(anchor="w")
+        
+        status_text_frame = ttk.Frame(status_label_frame)
+        status_text_frame.pack(fill="both", expand=True)
+        
+        self.status_text = tk.Text(status_text_frame, height=8, width=60, wrap="word", 
+                                   state="disabled", bg="#f0f0f0", font=("Courier", 9))
+        self.status_text.pack(side="left", fill="both", expand=True)
+        
+        status_scroll = ttk.Scrollbar(status_text_frame, orient="vertical", command=self.status_text.yview)
+        status_scroll.pack(side="right", fill="y")
+        self.status_text.configure(yscrollcommand=status_scroll.set)
+        
+        # Button to clear status log
+        ttk.Button(progress_frame, text="Clear Status Log", command=self.clear_status_log).pack(pady=(0,5))
+
         # Initial mode setup
         self.on_mode_change()
         
-        # ========== MODE SWITCHING ==========
+    # ========== PROGRESS AND STATUS HELPERS ==========
+    def update_progress(self, value, status_message=None):
+        """Update progress bar and optionally add status message"""
+        try:
+            self.progress_var.set(value)
+            self.progress_label.config(text=f"{int(value)}%")
+            if status_message:
+                self.update_status(status_message)
+            self.root.update_idletasks()
+        except Exception:
+            pass
+    
+    def update_status(self, message):
+        """Add a timestamped message to the status log"""
+        try:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self.status_text.config(state="normal")
+            self.status_text.insert("end", f"[{timestamp}] {message}\n")
+            self.status_text.see("end")
+            self.status_text.config(state="disabled")
+            self.root.update_idletasks()
+        except Exception:
+            pass
+    
+    def clear_status_log(self):
+        """Clear the status log"""
+        try:
+            self.status_text.config(state="normal")
+            self.status_text.delete("1.0", "end")
+            self.status_text.config(state="disabled")
+            self.progress_var.set(0)
+            self.progress_label.config(text="0%")
+        except Exception:
+            pass
+    
+    def reset_progress(self):
+        """Reset progress bar to 0"""
+        try:
+            self.progress_var.set(0)
+            self.progress_label.config(text="0%")
+        except Exception:
+            pass
+        
+    # ========== MODE SWITCHING ==========
     def on_mode_change(self):
         """Handle switching between CSV and TDMS modes"""
         mode = self.data_mode.get()
@@ -542,6 +619,7 @@ class CSVPlotter:
             
         folder_path = filedialog.askdirectory(title="Select Folder Containing TDMS Files")
         if folder_path:
+            self.update_status(f"Selected folder: {folder_path}")
             self.tdms_folder_entry.delete(0, "end")
             self.tdms_folder_entry.insert(0, folder_path)
             self.scan_tdms_folder(folder_path)
@@ -549,23 +627,34 @@ class CSVPlotter:
     def scan_tdms_folder(self, folder_path):
         """Scan folder for TDMS files and populate listbox"""
         try:
+            self.update_status("Scanning folder for TDMS files...")
+            self.reset_progress()
+            
             self.tdms_folder = Path(folder_path)
             self.tdms_files = sorted(self.tdms_folder.glob("*.tdms"))
             
             # Update listbox
             self.tdms_files_listbox.delete(0, tk.END)
-            for tdms_file in self.tdms_files:
+            total_files = len(self.tdms_files)
+            
+            for idx, tdms_file in enumerate(self.tdms_files):
                 self.tdms_files_listbox.insert(tk.END, tdms_file.name)
+                # Update progress for scanning
+                progress = ((idx + 1) / total_files) * 100 if total_files > 0 else 0
+                self.update_progress(progress)
             
             if not self.tdms_files:
+                self.update_status(f"No TDMS files found in folder")
                 messagebox.showwarning("No TDMS Files", f"No .tdms files found in {folder_path}")
             else:
+                self.update_status(f"Found {len(self.tdms_files)} TDMS file(s)")
                 messagebox.showinfo("TDMS Files Found", f"Found {len(self.tdms_files)} TDMS file(s)")
                 # Auto-select all files
                 for i in range(len(self.tdms_files)):
                     self.tdms_files_listbox.selection_set(i)
                 
         except Exception as e:
+            self.update_status(f"ERROR: Failed to scan folder - {e}")
             messagebox.showerror("Error", f"Failed to scan folder:\n{e}")
     
     def select_all_tdms(self):
@@ -623,13 +712,21 @@ class CSVPlotter:
         Assumes all files have the same channel structure.
         Files are concatenated with specified time offset between them.
         """
+        self.reset_progress()
+        self.update_status(f"Starting to load {len(tdms_file_paths)} TDMS file(s)...")
+        
         all_dataframes = []
         file_info = []
         
         # Get time offset in hours (hardcoded to 0)
         time_offset_hours = self.tdms_time_offset_hours
         
+        total_files = len(tdms_file_paths)
+        
         for file_idx, file_path in enumerate(tdms_file_paths):
+            # Update progress for each file
+            progress = (file_idx / total_files) * 70  # Reserve 70% for file loading
+            self.update_progress(progress, f"Loading file {file_idx + 1}/{total_files}: {file_path.name}")
             try:
                 tdms_file = TdmsFile.read(file_path)
                 
@@ -656,9 +753,11 @@ class CSVPlotter:
                 
                 # Create DataFrame from this file
                 if data_dict:
+                    self.update_status(f"  Creating DataFrame with {len(data_dict)} channels...")
                     df_file = pd.DataFrame(data_dict)
                     
                     # Convert Excel date/time columns if present
+                    self.update_status(f"  Converting date/time columns...")
                     df_file = self.convert_excel_date_column(df_file)
                     
                     # Add time offset for files after the first one
@@ -684,25 +783,32 @@ class CSVPlotter:
                     })
                     
             except Exception as e:
+                self.update_status(f"ERROR loading {file_path.name}: {e}")
                 messagebox.showwarning("File Error", f"Could not load {file_path.name}:\n{e}")
                 continue
         
         if not all_dataframes:
+            self.update_status("ERROR: No data could be loaded from selected files")
             messagebox.showerror("Error", "No data could be loaded from selected files")
             return
         
         # Concatenate all dataframes
+        self.update_progress(75, f"Concatenating {len(all_dataframes)} DataFrames...")
         try:
             self.df = pd.concat(all_dataframes, ignore_index=True)
+            self.update_progress(80, "Concatenation complete")
             
             # Convert any Excel date columns in the final dataframe
+            self.update_status("Converting date/time columns in merged data...")
             self.df = self.convert_excel_date_column(self.df)
+            self.update_progress(85, "Date conversion complete")
             
             # Check if there's a time column
             time_cols = [col for col in self.df.columns if 'time' in col.lower() or 'timestamp' in col.lower()]
             
             if not time_cols:
                 # No time column exists, create a continuous time index
+                self.update_status("Creating continuous time index...")
                 total_rows = len(self.df)
                 
                 # Assuming uniform sampling, create time array
@@ -723,7 +829,9 @@ class CSVPlotter:
                 self.df.insert(0, 'Index', range(len(self.df)))
             
             # Populate UI
+            self.update_progress(90, "Populating UI with channel list...")
             self.populate_ui_from_dataframe()
+            self.update_progress(95, "Preparing preview...")
             
             # Create info message
             info_msg = f"Loaded {len(tdms_file_paths)} TDMS file(s)\n"
@@ -734,11 +842,13 @@ class CSVPlotter:
             for info in file_info:
                 info_msg += f"  {info['name']}: {info['rows']} rows, offset: {info['offset_hours']:.1f}h\n"
             
+            self.update_progress(100, "TDMS files loaded successfully!")
             messagebox.showinfo("Success", info_msg)
             
             self.schedule_preview()
             
         except Exception as e:
+            self.update_status(f"ERROR: Failed to merge TDMS data - {e}")
             messagebox.showerror("Error", f"Failed to merge TDMS data:\n{e}")
     
     def populate_ui_from_dataframe(self):
@@ -900,30 +1010,43 @@ class CSVPlotter:
             self.load_csv(file_path)
     
     def load_csv(self, file_path):
+        self.reset_progress()
+        self.update_status(f"Loading CSV file: {os.path.basename(file_path)}")
         self.detected_header_line_index = None
         try:
+            self.update_progress(20, "Reading CSV file...")
             self.df = pd.read_csv(file_path)
+            self.update_progress(60, "CSV loaded, converting date columns...")
             # Convert any Excel date columns
             self.df = self.convert_excel_date_column(self.df)
+            self.update_progress(80, "Date conversion complete")
         except Exception as e:
             if "Error tokenizing data" in str(e) or "expected" in str(e):
                 try:
+                    self.update_status("Standard CSV parsing failed, trying PEC-style parser...")
                     self.df = self.load_csv_with_dynamic_header(file_path)
+                    self.update_progress(60, "PEC CSV loaded, converting date columns...")
                     # Convert any Excel date columns
                     self.df = self.convert_excel_date_column(self.df)
+                    self.update_progress(80, "Date conversion complete")
+                    self.update_status(f"PEC CSV loaded from line {self.detected_header_line_index}")
                     messagebox.showinfo("PEC CSV Loaded", 
                         f"Loaded PEC-style CSV starting from detected header line {self.detected_header_line_index}.\n"
                         f"File: {os.path.basename(file_path)}")
                 except Exception as e2:
+                    self.update_status(f"ERROR: Failed to parse CSV - {e2}")
                     messagebox.showerror("Error", 
                         f"Failed to parse CSV:\n{e}\nFallback parsing also failed:\n{e2}")
                     return
             else:
+                self.update_status(f"ERROR: Failed to load CSV - {e}")
                 messagebox.showerror("Error", str(e))
                 return
-    
+
         # populate UI
+        self.update_progress(90, "Populating UI with column list...")
         self.populate_ui_from_dataframe()
+        self.update_progress(100, f"CSV loaded successfully! Rows: {len(self.df)}, Columns: {len(self.df.columns)}")
         self.schedule_preview()
     
     # ---------------- Channel props sync helpers ----------------
@@ -1256,6 +1379,7 @@ class CSVPlotter:
         self._explicit_preview_request = False
 
         if self.df is None:
+            self.update_status("No data loaded for preview")
             try:
                 self.fig.clf()
                 self.canvas.draw()
@@ -1638,9 +1762,14 @@ class CSVPlotter:
             pass
 
         try:
+            if explicit:
+                self.update_status("Rendering plot preview...")
             self.canvas.figure = self.fig
             self.canvas.draw()
-        except Exception:
+            if explicit:
+                self.update_status("Plot preview complete")
+        except Exception as e:
+            self.update_status(f"ERROR: Failed to render plot - {e}")
             pass
         
     # ---------------- Save / Load configuration ----------------
@@ -1968,6 +2097,9 @@ class CSVPlotter:
         if not filename:
             return
         
+        self.reset_progress()
+        self.update_status(f"Saving plot to: {os.path.basename(filename)}")
+        
         try:
             pw = float(self.plot_width.get())
             ph = float(self.plot_height.get())
@@ -1975,6 +2107,7 @@ class CSVPlotter:
             pw = self.default_plot_width
             ph = self.default_plot_height
 
+        self.update_progress(10, "Creating figure for export...")
         fig_save, ax_save = plt.subplots(figsize=(pw, ph))
         x_col = self.x_combo.get()
         selected_indices = self.y_listbox.curselection()
@@ -1990,6 +2123,7 @@ class CSVPlotter:
             global_lw = 1.0
 
         # Plot left axis
+        self.update_progress(20, "Preparing data for export...")
         # Prepare X-axis data once
         x_data = self.df[x_col].values
         if pd.api.types.is_datetime64_any_dtype(x_data):
@@ -2037,8 +2171,11 @@ class CSVPlotter:
         except Exception:
             pass
 
+        self.update_progress(40, "Plotting left Y-axis data...")
+        
         ax2_save = None
         if right_cols:
+            self.update_progress(50, "Plotting right Y-axis 1 data...")
             ax2_save = ax_save.twinx()
             for y_col, row in zip(right_cols, self.right_line_properties_frames):
                 try:
@@ -2090,6 +2227,7 @@ class CSVPlotter:
 
         ax3_save = None
         if right2_cols:
+            self.update_progress(60, "Plotting right Y-axis 2 data...")
             ax3_save = ax_save.twinx()
             try:
                 pos = float(self.right2_pos.get())
@@ -2145,6 +2283,7 @@ class CSVPlotter:
                 pass
 
         # Apply axis limits
+        self.update_progress(70, "Applying axis limits and formatting...")
         try:
             xmin = float(self.xmin_entry.get()) if self.xmin_entry.get() else None
             xmax = float(self.xmax_entry.get()) if self.xmax_entry.get() else None
@@ -2290,15 +2429,19 @@ class CSVPlotter:
             dpi = 200
         
         try:
+            self.update_progress(90, f"Saving PNG at {dpi} DPI...")
             fig_save.savefig(filename, dpi=dpi, bbox_inches="tight")
             plt.close(fig_save)
+            self.update_progress(100, f"Plot saved successfully: {os.path.basename(filename)}")
             messagebox.showinfo("Saved", f"Plot saved as {filename} at {dpi} DPI")
         except Exception as e:
+            self.update_status(f"ERROR: Failed to save plot - {e}")
             messagebox.showerror("Save Error", str(e))
             
     # ---------------- Resets ----------------
     def reset_all(self):
         try:
+            self.update_status("Resetting all settings...")
             self.df = None
             self.file_entry.delete(0, "end")
             self.tdms_folder_entry.delete(0, "end")
@@ -2334,6 +2477,8 @@ class CSVPlotter:
             except Exception:
                 pass
             self.schedule_preview()
+            self.update_status("All settings reset to defaults")
+            self.reset_progress()
         except Exception:
             pass
 
