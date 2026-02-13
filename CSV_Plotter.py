@@ -939,7 +939,8 @@ class CSVPlotter:
                         "line_color": getattr(row, "line_color", ""),
                         "marker_color": getattr(row, "marker_color", "") or "",
                         "style": row.line_style.get() if hasattr(row, "line_style") else "",
-                        "marker": row.marker.get() if hasattr(row, "marker") else ""
+                        "marker": row.marker.get() if hasattr(row, "marker") else "",
+                        "scatter": row.scatter_mode.get() if hasattr(row, "scatter_mode") else False
                     }
                 except Exception:
                     continue
@@ -953,7 +954,8 @@ class CSVPlotter:
                         "line_color": getattr(row, "line_color", ""),
                         "marker_color": getattr(row, "marker_color", "") or "",
                         "style": row.line_style.get() if hasattr(row, "line_style") else "",
-                        "marker": row.marker.get() if hasattr(row, "marker") else ""
+                        "marker": row.marker.get() if hasattr(row, "marker") else "",
+                        "scatter": row.scatter_mode.get() if hasattr(row, "scatter_mode") else False
                     }
                 except Exception:
                     continue
@@ -967,7 +969,8 @@ class CSVPlotter:
                         "line_color": getattr(row, "line_color", ""),
                         "marker_color": getattr(row, "marker_color", "") or "",
                         "style": row.line_style.get() if hasattr(row, "line_style") else "",
-                        "marker": row.marker.get() if hasattr(row, "marker") else ""
+                        "marker": row.marker.get() if hasattr(row, "marker") else "",
+                        "scatter": row.scatter_mode.get() if hasattr(row, "scatter_mode") else False
                     }
                 except Exception:
                     continue
@@ -1006,6 +1009,11 @@ class CSVPlotter:
             if 'marker' in p and hasattr(row, 'marker'):
                 try:
                     row.marker.set(p.get('marker', row.marker.get()))
+                except Exception:
+                    pass
+            if 'scatter' in p and hasattr(row, 'scatter_mode'):
+                try:
+                    row.scatter_mode.set(p.get('scatter', False))
                 except Exception:
                     pass
         except Exception:
@@ -1063,6 +1071,13 @@ class CSVPlotter:
             label_entry = ttk.Entry(row, textvariable=label_var, width=30)
             label_entry.pack(side="left", padx=4)
             label_entry.bind("<KeyRelease>", lambda e: (self.sync_channel_props_from_frames(), self.schedule_preview()))
+            
+            # Scatter plot checkbox
+            scatter_var = tk.BooleanVar(value=False)
+            scatter_cb = ttk.Checkbutton(row, text="Scatter", variable=scatter_var, 
+                                        command=lambda: (self.sync_channel_props_from_frames(), self.schedule_preview()))
+            scatter_cb.pack(side="left", padx=(8,4))
+            
             style_var = tk.StringVar(value="-")
             ttk.Label(row, text="Style:").pack(side="left", padx=(8,2))
             style_cb = ttk.Combobox(row, values=["-","--","-.",":"], textvariable=style_var, width=4)
@@ -1070,7 +1085,7 @@ class CSVPlotter:
             style_cb.bind("<<ComboboxSelected>>", lambda e: (self.sync_channel_props_from_frames(), self.schedule_preview()))
             marker_var = tk.StringVar(value="None")
             ttk.Label(row, text="Marker:").pack(side="left", padx=(6,2))
-            marker_cb = ttk.Combobox(row, values=["None","o","s","^","*"], textvariable=marker_var, width=4)
+            marker_cb = ttk.Combobox(row, values=["None","o","s","^","*","x","+","d","v","<",">","p","h"], textvariable=marker_var, width=4)
             marker_cb.pack(side="left")
             marker_cb.bind("<<ComboboxSelected>>", lambda e: (self.sync_channel_props_from_frames(), self.schedule_preview()))
             color = next(self.color_cycle)
@@ -1085,6 +1100,7 @@ class CSVPlotter:
             row.line_color = color
             row.line_style = style_var
             row.marker = marker_var
+            row.scatter_mode = scatter_var
             row._linked_label_var = label_var
             row._swatch = swatch
             self.apply_props_to_row(row, col, self.left_channel_props)
@@ -1105,6 +1121,13 @@ class CSVPlotter:
             label_entry = ttk.Entry(row, textvariable=label_var, width=30)
             label_entry.pack(side="left", padx=4)
             label_entry.bind("<KeyRelease>", lambda e: (self.sync_channel_props_from_frames(), self.schedule_preview()))
+            
+            # Scatter plot checkbox
+            scatter_var = tk.BooleanVar(value=False)
+            scatter_cb = ttk.Checkbutton(row, text="Scatter", variable=scatter_var, 
+                                        command=lambda: (self.sync_channel_props_from_frames(), self.schedule_preview()))
+            scatter_cb.pack(side="left", padx=(8,4))
+            
             style_var = tk.StringVar(value="-")
             ttk.Label(row, text="Style:").pack(side="left", padx=(8,2))
             style_cb = ttk.Combobox(row, values=["-","--","-.",":"], textvariable=style_var, width=4)
@@ -1112,7 +1135,7 @@ class CSVPlotter:
             style_cb.bind("<<ComboboxSelected>>", lambda e: (self.sync_channel_props_from_frames(), self.schedule_preview()))
             marker_var = tk.StringVar(value="None")
             ttk.Label(row, text="Marker:").pack(side="left", padx=(6,2))
-            marker_cb = ttk.Combobox(row, values=["None","o","s","^","*"], textvariable=marker_var, width=4)
+            marker_cb = ttk.Combobox(row, values=["None","o","s","^","*","x","+","d","v","<",">","p","h"], textvariable=marker_var, width=4)
             marker_cb.pack(side="left")
             marker_cb.bind("<<ComboboxSelected>>", lambda e: (self.sync_channel_props_from_frames(), self.schedule_preview()))
             color = next(self.right_color_cycle)
@@ -1127,6 +1150,7 @@ class CSVPlotter:
             row.line_color = color
             row.line_style = style_var
             row.marker = marker_var
+            row.scatter_mode = scatter_var
             row._linked_label_var = label_var
             row._swatch = swatch
             self.apply_props_to_row(row, col, self.right_channel_props)
@@ -1147,6 +1171,13 @@ class CSVPlotter:
             label_entry = ttk.Entry(row, textvariable=label_var, width=30)
             label_entry.pack(side="left", padx=4)
             label_entry.bind("<KeyRelease>", lambda e: (self.sync_channel_props_from_frames(), self.schedule_preview()))
+            
+            # Scatter plot checkbox
+            scatter_var = tk.BooleanVar(value=False)
+            scatter_cb = ttk.Checkbutton(row, text="Scatter", variable=scatter_var, 
+                                        command=lambda: (self.sync_channel_props_from_frames(), self.schedule_preview()))
+            scatter_cb.pack(side="left", padx=(8,4))
+            
             style_var = tk.StringVar(value="-")
             ttk.Label(row, text="Style:").pack(side="left", padx=(8,2))
             style_cb = ttk.Combobox(row, values=["-","--","-.",":"], textvariable=style_var, width=4)
@@ -1154,7 +1185,7 @@ class CSVPlotter:
             style_cb.bind("<<ComboboxSelected>>", lambda e: (self.sync_channel_props_from_frames(), self.schedule_preview()))
             marker_var = tk.StringVar(value="None")
             ttk.Label(row, text="Marker:").pack(side="left", padx=(6,2))
-            marker_cb = ttk.Combobox(row, values=["None","o","s","^","*"], textvariable=marker_var, width=4)
+            marker_cb = ttk.Combobox(row, values=["None","o","s","^","*","x","+","d","v","<",">","p","h"], textvariable=marker_var, width=4)
             marker_cb.pack(side="left")
             marker_cb.bind("<<ComboboxSelected>>", lambda e: (self.sync_channel_props_from_frames(), self.schedule_preview()))
             color = next(self.right2_color_cycle)
@@ -1169,6 +1200,7 @@ class CSVPlotter:
             row.line_color = color
             row.line_style = style_var
             row.marker = marker_var
+            row.scatter_mode = scatter_var
             row._linked_label_var = label_var
             row._swatch = swatch
             self.apply_props_to_row(row, col, self.right2_channel_props)
@@ -1346,14 +1378,28 @@ class CSVPlotter:
                     pass
                 return
             try:
+                # Check if scatter mode is enabled
+                is_scatter = hasattr(row, 'scatter_mode') and row.scatter_mode.get()
+                
                 marker = None if (row.marker.get() == "None") else row.marker.get()
+                
+                # For scatter mode, force marker if none selected
+                if is_scatter and (marker is None or marker == "None"):
+                    marker = "o"
+                
                 x_arr, y_arr = get_xy_arrays(y_col)
                 if x_arr.size == 0:
                     continue
                 mcolor = getattr(row, "marker_color", "") or row.line_color
-                self.ax.plot(x_arr, y_arr, linestyle=row.line_style.get(), linewidth=global_lw,
-                             color=row.line_color, marker=marker, markersize=self.marker_size.get(),
-                             markerfacecolor=mcolor, markeredgecolor=mcolor, label=label)
+                
+                # Scatter mode: no line, only markers
+                if is_scatter:
+                    self.ax.scatter(x_arr, y_arr, s=self.marker_size.get()**2, 
+                                   c=mcolor, marker=marker, label=label, edgecolors=mcolor)
+                else:
+                    self.ax.plot(x_arr, y_arr, linestyle=row.line_style.get(), linewidth=global_lw,
+                                 color=row.line_color, marker=marker, markersize=self.marker_size.get(),
+                                 markerfacecolor=mcolor, markeredgecolor=mcolor, label=label)
             except Exception:
                 continue
 
@@ -1378,14 +1424,28 @@ class CSVPlotter:
                         pass
                     return
                 try:
+                    # Check if scatter mode is enabled
+                    is_scatter = hasattr(row, 'scatter_mode') and row.scatter_mode.get()
+                    
                     marker = None if (row.marker.get() == "None") else row.marker.get()
+                    
+                    # For scatter mode, force marker if none selected
+                    if is_scatter and (marker is None or marker == "None"):
+                        marker = "o"
+                    
                     x_arr, y_arr = get_xy_arrays(y_col)
                     if x_arr.size == 0:
                         continue
                     mcolor = getattr(row, "marker_color", "") or row.line_color
-                    ax2.plot(x_arr, y_arr, linestyle=row.line_style.get(), linewidth=global_lw,
-                             color=row.line_color, marker=marker, markersize=self.marker_size.get(),
-                             markerfacecolor=mcolor, markeredgecolor=mcolor, label=label)
+                    
+                    # Scatter mode: no line, only markers
+                    if is_scatter:
+                        ax2.scatter(x_arr, y_arr, s=self.marker_size.get()**2, 
+                                   c=mcolor, marker=marker, label=label, edgecolors=mcolor)
+                    else:
+                        ax2.plot(x_arr, y_arr, linestyle=row.line_style.get(), linewidth=global_lw,
+                                 color=row.line_color, marker=marker, markersize=self.marker_size.get(),
+                                 markerfacecolor=mcolor, markeredgecolor=mcolor, label=label)
                 except Exception:
                     continue
             try:
@@ -1422,14 +1482,28 @@ class CSVPlotter:
                         pass
                     return
                 try:
+                    # Check if scatter mode is enabled
+                    is_scatter = hasattr(row, 'scatter_mode') and row.scatter_mode.get()
+                    
                     marker = None if (row.marker.get() == "None") else row.marker.get()
+                    
+                    # For scatter mode, force marker if none selected
+                    if is_scatter and (marker is None or marker == "None"):
+                        marker = "o"
+                    
                     x_arr, y_arr = get_xy_arrays(y_col)
                     if x_arr.size == 0:
                         continue
                     mcolor = getattr(row, "marker_color", "") or row.line_color
-                    ax3.plot(x_arr, y_arr, linestyle=row.line_style.get(), linewidth=global_lw,
-                             color=row.line_color, marker=marker, markersize=self.marker_size.get(),
-                             markerfacecolor=mcolor, markeredgecolor=mcolor, label=label)
+                    
+                    # Scatter mode: no line, only markers
+                    if is_scatter:
+                        ax3.scatter(x_arr, y_arr, s=self.marker_size.get()**2, 
+                                   c=mcolor, marker=marker, label=label, edgecolors=mcolor)
+                    else:
+                        ax3.plot(x_arr, y_arr, linestyle=row.line_style.get(), linewidth=global_lw,
+                                 color=row.line_color, marker=marker, markersize=self.marker_size.get(),
+                                 markerfacecolor=mcolor, markeredgecolor=mcolor, label=label)
                 except Exception:
                     continue
             try:
@@ -1616,7 +1690,8 @@ class CSVPlotter:
                     'line_color': getattr(row, 'line_color', ""),
                     'marker_color': getattr(row, 'marker_color', "") or "",
                     'style': row.line_style.get() if hasattr(row, 'line_style') else "",
-                    'marker': row.marker.get() if hasattr(row, 'marker') else ""
+                    'marker': row.marker.get() if hasattr(row, 'marker') else "",
+                    'scatter': row.scatter_mode.get() if hasattr(row, 'scatter_mode') else False
                 })
             except Exception:
                 continue
@@ -1630,7 +1705,8 @@ class CSVPlotter:
                     'line_color': getattr(row, 'line_color', ""),
                     'marker_color': getattr(row, 'marker_color', "") or "",
                     'style': row.line_style.get() if hasattr(row, 'line_style') else "",
-                    'marker': row.marker.get() if hasattr(row, 'marker') else ""
+                    'marker': row.marker.get() if hasattr(row, 'marker') else "",
+                    'scatter': row.scatter_mode.get() if hasattr(row, 'scatter_mode') else False
                 })
             except Exception:
                 continue
@@ -1644,7 +1720,8 @@ class CSVPlotter:
                     'line_color': getattr(row, 'line_color', ""),
                     'marker_color': getattr(row, 'marker_color', "") or "",
                     'style': row.line_style.get() if hasattr(row, 'line_style') else "",
-                    'marker': row.marker.get() if hasattr(row, 'marker') else ""
+                    'marker': row.marker.get() if hasattr(row, 'marker') else "",
+                    'scatter': row.scatter_mode.get() if hasattr(row, 'scatter_mode') else False
                 })
             except Exception:
                 continue
@@ -1834,7 +1911,8 @@ class CSVPlotter:
                         "line_color": p.get('line_color', ""),
                         "marker_color": p.get('marker_color', "") or "",
                         "style": p.get('style', "-"),
-                        "marker": p.get('marker', "None")
+                        "marker": p.get('marker', "None"),
+                        "scatter": p.get('scatter', False)
                     }
             except Exception:
                 pass
@@ -1850,7 +1928,8 @@ class CSVPlotter:
                         "line_color": p.get('line_color', ""),
                         "marker_color": p.get('marker_color', "") or "",
                         "style": p.get('style', "-"),
-                        "marker": p.get('marker', "None")
+                        "marker": p.get('marker', "None"),
+                        "scatter": p.get('scatter', False)
                     }
             except Exception:
                 pass
@@ -1866,7 +1945,8 @@ class CSVPlotter:
                         "line_color": p.get('line_color', ""),
                         "marker_color": p.get('marker_color', "") or "",
                         "style": p.get('style', "-"),
-                        "marker": p.get('marker', "None")
+                        "marker": p.get('marker', "None"),
+                        "scatter": p.get('scatter', False)
                     }
             except Exception:
                 pass
@@ -1917,20 +1997,35 @@ class CSVPlotter:
         
         for y_col, row in zip(y_cols, self.line_properties_frames):
             try:
+                # Check if scatter mode is enabled
+                is_scatter = hasattr(row, 'scatter_mode') and row.scatter_mode.get()
+                
                 marker = None if (row.marker.get() == "None") else row.marker.get()
+                
+                # For scatter mode, force marker if none selected
+                if is_scatter and (marker is None or marker == "None"):
+                    marker = "o"
+                
                 ydata = self.df[y_col].values.astype(float)
                 mcolor = getattr(row, "marker_color", "") or row.line_color
-                ax_save.plot(
-                    x_data, ydata,
-                    linestyle=row.line_style.get(),
-                    linewidth=global_lw,
-                    color=row.line_color,
-                    marker=marker,
-                    markersize=self.marker_size.get(),
-                    markerfacecolor=mcolor,
-                    markeredgecolor=mcolor,
-                    label=row._linked_label_var.get()
-                )
+                
+                # Scatter mode: no line, only markers
+                if is_scatter:
+                    ax_save.scatter(x_data, ydata, s=self.marker_size.get()**2, 
+                                   c=mcolor, marker=marker, label=row._linked_label_var.get(), 
+                                   edgecolors=mcolor)
+                else:
+                    ax_save.plot(
+                        x_data, ydata,
+                        linestyle=row.line_style.get(),
+                        linewidth=global_lw,
+                        color=row.line_color,
+                        marker=marker,
+                        markersize=self.marker_size.get(),
+                        markerfacecolor=mcolor,
+                        markeredgecolor=mcolor,
+                        label=row._linked_label_var.get()
+                    )
             except Exception:
                 continue
 
@@ -1947,20 +2042,35 @@ class CSVPlotter:
             ax2_save = ax_save.twinx()
             for y_col, row in zip(right_cols, self.right_line_properties_frames):
                 try:
+                    # Check if scatter mode is enabled
+                    is_scatter = hasattr(row, 'scatter_mode') and row.scatter_mode.get()
+                    
                     marker = None if (row.marker.get() == "None") else row.marker.get()
+                    
+                    # For scatter mode, force marker if none selected
+                    if is_scatter and (marker is None or marker == "None"):
+                        marker = "o"
+                    
                     ydata = self.df[y_col].values.astype(float)
                     mcolor = getattr(row, "marker_color", "") or row.line_color
-                    ax2_save.plot(
-                        x_data, ydata,
-                        linestyle=row.line_style.get(),
-                        linewidth=global_lw,
-                        color=row.line_color,
-                        marker=marker,
-                        markersize=self.marker_size.get(),
-                        markerfacecolor=mcolor,
-                        markeredgecolor=mcolor,
-                        label=row._linked_label_var.get()
-                    )
+                    
+                    # Scatter mode: no line, only markers
+                    if is_scatter:
+                        ax2_save.scatter(x_data, ydata, s=self.marker_size.get()**2, 
+                                       c=mcolor, marker=marker, label=row._linked_label_var.get(), 
+                                       edgecolors=mcolor)
+                    else:
+                        ax2_save.plot(
+                            x_data, ydata,
+                            linestyle=row.line_style.get(),
+                            linewidth=global_lw,
+                            color=row.line_color,
+                            marker=marker,
+                            markersize=self.marker_size.get(),
+                            markerfacecolor=mcolor,
+                            markeredgecolor=mcolor,
+                            label=row._linked_label_var.get()
+                        )
                 except Exception:
                     continue
             try:
@@ -1988,20 +2098,35 @@ class CSVPlotter:
                 pass
             for y_col, row in zip(right2_cols, self.right2_line_properties_frames):
                 try:
+                    # Check if scatter mode is enabled
+                    is_scatter = hasattr(row, 'scatter_mode') and row.scatter_mode.get()
+                    
                     marker = None if (row.marker.get() == "None") else row.marker.get()
+                    
+                    # For scatter mode, force marker if none selected
+                    if is_scatter and (marker is None or marker == "None"):
+                        marker = "o"
+                    
                     ydata = self.df[y_col].values.astype(float)
                     mcolor = getattr(row, "marker_color", "") or row.line_color
-                    ax3_save.plot(
-                        x_data, ydata,
-                        linestyle=row.line_style.get(),
-                        linewidth=global_lw,
-                        color=row.line_color,
-                        marker=marker,
-                        markersize=self.marker_size.get(),
-                        markerfacecolor=mcolor,
-                        markeredgecolor=mcolor,
-                        label=row._linked_label_var.get()
-                    )
+                    
+                    # Scatter mode: no line, only markers
+                    if is_scatter:
+                        ax3_save.scatter(x_data, ydata, s=self.marker_size.get()**2, 
+                                       c=mcolor, marker=marker, label=row._linked_label_var.get(), 
+                                       edgecolors=mcolor)
+                    else:
+                        ax3_save.plot(
+                            x_data, ydata,
+                            linestyle=row.line_style.get(),
+                            linewidth=global_lw,
+                            color=row.line_color,
+                            marker=marker,
+                            markersize=self.marker_size.get(),
+                            markerfacecolor=mcolor,
+                            markeredgecolor=mcolor,
+                            label=row._linked_label_var.get()
+                        )
                 except Exception:
                     continue
             try:
