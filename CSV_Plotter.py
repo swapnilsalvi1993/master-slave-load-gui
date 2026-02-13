@@ -12,6 +12,9 @@ import io
 import os
 from pathlib import Path
 
+# Excel date conversion constant (Excel epoch: January 1, 1900)
+EXCEL_EPOCH = datetime(1899, 12, 30)  # Note: Excel incorrectly treats 1900 as a leap year
+
 # Try to import nptdms for TDMS support
 try:
     from nptdms import TdmsFile
@@ -588,6 +591,31 @@ class CSVPlotter:
             self.load_tdms_files(selected_files)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load TDMS files:\n{e}")
+
+    def convert_excel_date_column(self, df):
+        """
+        Convert Excel date/time format columns to readable datetime format.
+        Looks for columns with 'date' or 'time' in name and Excel-like numeric values.
+        """
+        for col in df.columns:
+            col_lower = col.lower()
+            # Check if column name suggests it's a date/time column
+            if any(keyword in col_lower for keyword in ['date', 'time', 'timestamp']):
+                try:
+                    # Check if the column contains numeric values (Excel date format)
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        # Convert Excel date to datetime
+                        # Excel stores dates as days since December 30, 1899
+                        df[col + '_Converted'] = pd.to_datetime(
+                            EXCEL_EPOCH + pd.to_timedelta(df[col], 'D')
+                        )
+                        # Format as string in YYYY/MM/DD - HH:MM:SS format
+                        df[col + '_Converted'] = df[col + '_Converted'].dt.strftime('%Y/%m/%d - %H:%M:%S')
+                except Exception as e:
+                    # If conversion fails, skip this column
+                    print(f"Could not convert column {col}: {e}")
+                    continue
+        return df
     
     def load_tdms_files(self, tdms_file_paths):
         """
@@ -630,6 +658,9 @@ class CSVPlotter:
                 if data_dict:
                     df_file = pd.DataFrame(data_dict)
                     
+                    # Convert Excel date/time columns if present
+                    df_file = self.convert_excel_date_column(df_file)
+                    
                     # Add time offset for files after the first one
                     if file_idx > 0:
                         # Calculate time offset in seconds for each subsequent file
@@ -663,6 +694,9 @@ class CSVPlotter:
         # Concatenate all dataframes
         try:
             self.df = pd.concat(all_dataframes, ignore_index=True)
+            
+            # Convert any Excel date columns in the final dataframe
+            self.df = self.convert_excel_date_column(self.df)
             
             # Check if there's a time column
             time_cols = [col for col in self.df.columns if 'time' in col.lower() or 'timestamp' in col.lower()]
@@ -728,7 +762,12 @@ class CSVPlotter:
             self.right2_y_listbox.insert("end", col)
         
         # Auto-select time/index as X-axis
-        if 'Time_Continuous' in columns:
+        # Prioritize converted datetime columns
+        converted_cols = [col for col in columns if col.endswith('_Converted')]
+        
+        if converted_cols:
+            self.x_combo.set(converted_cols[0])
+        elif 'Time_Continuous' in columns:
             self.x_combo.set('Time_Continuous')
         elif 'Index' in columns:
             self.x_combo.set('Index')
@@ -864,10 +903,14 @@ class CSVPlotter:
         self.detected_header_line_index = None
         try:
             self.df = pd.read_csv(file_path)
+            # Convert any Excel date columns
+            self.df = self.convert_excel_date_column(self.df)
         except Exception as e:
             if "Error tokenizing data" in str(e) or "expected" in str(e):
                 try:
                     self.df = self.load_csv_with_dynamic_header(file_path)
+                    # Convert any Excel date columns
+                    self.df = self.convert_excel_date_column(self.df)
                     messagebox.showinfo("PEC CSV Loaded", 
                         f"Loaded PEC-style CSV starting from detected header line {self.detected_header_line_index}.\n"
                         f"File: {os.path.basename(file_path)}")
@@ -1446,6 +1489,11 @@ class CSVPlotter:
         try:
             self.ax.set_title(self.title_entry.get(), fontsize=fs)
             self.ax.set_xlabel(self.xlabel_entry.get() or x_col, fontsize=fs)
+            
+            # Rotate x-axis labels if using converted datetime format
+            if x_col.endswith('_Converted'):
+                self.ax.tick_params(axis='x', rotation=45)
+                self.fig.tight_layout()
             self.ax.set_ylabel(self.ylabel_entry.get() or ", ".join(labels), fontsize=fs)
             self.ax.tick_params(axis="both", labelsize=fs)
             if ax2:
@@ -2011,6 +2059,11 @@ class CSVPlotter:
         try:
             ax_save.set_title(self.title_entry.get(), fontsize=fs)
             ax_save.set_xlabel(self.xlabel_entry.get() or x_col, fontsize=fs)
+            
+            # Rotate x-axis labels if using converted datetime format
+            if x_col.endswith('_Converted'):
+                ax_save.tick_params(axis='x', rotation=45)
+                fig_save.tight_layout()
             ax_save.set_ylabel(
                 self.ylabel_entry.get() or ", ".join([r._linked_label_var.get() for r in self.line_properties_frames]),
                 fontsize=fs
