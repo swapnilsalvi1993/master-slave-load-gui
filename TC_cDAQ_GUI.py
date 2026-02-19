@@ -66,6 +66,7 @@ class ThermocopleDAQGUI:
         self.channel_style_vars = []
         self.channel_color_vars = []
         self.channel_frames = []
+        self.temp_display_labels = []  # NEW: Store temp display label widgets
         
         # Create GUI
         self.create_widgets()
@@ -103,13 +104,20 @@ class ThermocopleDAQGUI:
         # Configure grid weights
         self.setup_tab.columnconfigure(0, weight=0, minsize=350)
         self.setup_tab.columnconfigure(1, weight=0, minsize=350)
-        self.setup_tab.columnconfigure(2, weight=0, minsize=350)
+        self.setup_tab.columnconfigure(2, weight=0, minsize=550)
         self.setup_tab.columnconfigure(3, weight=1)
         self.setup_tab.rowconfigure(0, weight=1)
+        
+        # Store widgets to disable during acquisition
+        self.config_widgets = []
+        self.channel_name_entries = []
         
         # ===== COLUMN 1: DAQ and Experiment Configuration =====
         col1_frame = ttk.Frame(self.setup_tab)
         col1_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 5))
+        
+        # Store col1_frame to disable all its children
+        self.col1_frame = col1_frame
         
         # Make column 1 scrollable
         canvas_col1 = tk.Canvas(col1_frame, width=340)
@@ -294,7 +302,7 @@ class ThermocopleDAQGUI:
         
         # Create scrollable text widget for status log
         log_scroll = ttk.Scrollbar(status_frame, orient="vertical")
-        self.status_log = tk.Text(status_frame, height=20, width=35, wrap=tk.WORD, 
+        self.status_log = tk.Text(status_frame, height=20, width=55, wrap=tk.WORD, 
                                   yscrollcommand=log_scroll.set, font=("Courier", 9))
         log_scroll.config(command=self.status_log.yview)
         
@@ -397,6 +405,18 @@ class ThermocopleDAQGUI:
                 'acquisition_rate': self.acq_rate_var.get(),
                 'time_window': self.time_window_var.get(),
                 'csv_logging': self.csv_logging_var.get(),
+                'plot_settings': {
+                    'plot_title': self.plot_title_var.get(),
+                    'left_yaxis_title': self.left_yaxis_title_var.get(),
+                    'right_yaxis_title': self.right_yaxis_title_var.get(),
+                    'left_y_auto': self.left_y_auto_var.get(),
+                    'left_y_min': self.left_y_min_var.get(),
+                    'left_y_max': self.left_y_max_var.get(),
+                    'right_y_auto': self.right_y_auto_var.get(),
+                    'right_y_min': self.right_y_min_var.get(),
+                    'right_y_max': self.right_y_max_var.get(),
+                    'x_axis_auto': self.x_axis_auto_var.get()
+                },
                 'channels': []
             }
             
@@ -407,7 +427,8 @@ class ThermocopleDAQGUI:
                         'enabled': self.channel_selection_vars[i].get(),
                         'label': self.channel_label_vars[i].get(),
                         'color': self.channel_color_vars[i].get(),
-                        'style': self.channel_style_vars[i].get()
+                        'style': self.channel_style_vars[i].get(),
+                        'yaxis': self.channel_yaxis_vars[i].get()
                     }
                     config['channels'].append(channel_config)
             
@@ -456,6 +477,20 @@ class ThermocopleDAQGUI:
             self.time_window_var.set(config.get('time_window', '1 hour'))
             self.csv_logging_var.set(config.get('csv_logging', False))
             
+            # Load plot settings
+            if 'plot_settings' in config:
+                ps = config['plot_settings']
+                self.plot_title_var.set(ps.get('plot_title', 'Thermocouple Temperature vs Time'))
+                self.left_yaxis_title_var.set(ps.get('left_yaxis_title', 'Temperature (°C)'))
+                self.right_yaxis_title_var.set(ps.get('right_yaxis_title', 'Temperature (°C)'))
+                self.left_y_auto_var.set(ps.get('left_y_auto', True))
+                self.left_y_min_var.set(ps.get('left_y_min', '0'))
+                self.left_y_max_var.set(ps.get('left_y_max', '100'))
+                self.right_y_auto_var.set(ps.get('right_y_auto', True))
+                self.right_y_min_var.set(ps.get('right_y_min', '0'))
+                self.right_y_max_var.set(ps.get('right_y_max', '100'))
+                self.x_axis_auto_var.set(ps.get('x_axis_auto', True))
+            
             # Apply DAQ configuration
             self.apply_daq_config()
             
@@ -467,6 +502,7 @@ class ThermocopleDAQGUI:
                         self.channel_label_vars[i].set(channel_config.get('label', f'Channel {i}'))
                         self.channel_color_vars[i].set(channel_config.get('color', self.colors[i % len(self.colors)]))
                         self.channel_style_vars[i].set(channel_config.get('style', 'Line'))
+                        self.channel_yaxis_vars[i].set(channel_config.get('yaxis', 'Left'))
             
             self.log_status(f"Configuration loaded from: {os.path.basename(filename)}")
             messagebox.showinfo("Success", "Configuration loaded successfully!")
@@ -514,9 +550,12 @@ class ThermocopleDAQGUI:
             self.channel_label_vars = []
             self.channel_style_vars = []
             self.channel_color_vars = []
+            self.channel_yaxis_vars = []  # NEW: Y-axis selection
             self.temp_labels = []
             self.stats_labels = []
             self.temperature_data = [[] for _ in range(num_channels)]
+            self.channel_name_entries = []
+            self.temp_display_labels = []  # NEW: Reset temp display labels
             
             # Create channel configuration UI
             for i in range(num_channels):
@@ -532,9 +571,14 @@ class ThermocopleDAQGUI:
                 
                 # Custom Label
                 ttk.Label(ch_frame, text="Label:").grid(row=1, column=0, sticky=tk.W, pady=2)
-                label_var = tk.StringVar(value=f"Channel {i}")
+                label_var = tk.StringVar(value=f"{self.device_name}_ai{start_channel + i}")
                 self.channel_label_vars.append(label_var)
-                ttk.Entry(ch_frame, textvariable=label_var, width=18).grid(row=1, column=1, pady=2, padx=2)
+                label_entry = ttk.Entry(ch_frame, textvariable=label_var, width=18)
+                label_entry.grid(row=1, column=1, pady=2, padx=2)
+                self.channel_name_entries.append(label_entry)
+                
+                # Add trace to update Run tab when label changes
+                label_var.trace_add('write', lambda *args, idx=i: self.on_channel_label_change(idx))
                 
                 # Color selection
                 ttk.Label(ch_frame, text="Color:").grid(row=2, column=0, sticky=tk.W, pady=2)
@@ -555,9 +599,31 @@ class ThermocopleDAQGUI:
                                           state="readonly", width=15)
                 style_combo.grid(row=3, column=1, pady=2, padx=2)
                 
+                # Y-Axis selection (NEW)
+                ttk.Label(ch_frame, text="Y-Axis:").grid(row=4, column=0, sticky=tk.W, pady=2)
+                yaxis_var = tk.StringVar(value="Left")
+                self.channel_yaxis_vars.append(yaxis_var)
+                yaxis_combo = ttk.Combobox(ch_frame, textvariable=yaxis_var,
+                                           values=['Left', 'Right'],
+                                           state="readonly", width=15)
+                yaxis_combo.grid(row=4, column=1, pady=2, padx=2)
+                
                 # Create temperature display
                 temp_frame = ttk.Frame(self.temp_display_frame)
                 temp_frame.pack(fill=tk.X, pady=3)
+                
+                # Use custom label for display
+                channel_display_label = ttk.Label(temp_frame, text=f"{self.device_name}_ai{start_channel + i}:", 
+                                                 font=("Arial", 10, "bold"), width=20)  # Increased width
+                channel_display_label.pack(side=tk.LEFT, padx=5)
+                
+                temp_label = ttk.Label(temp_frame, text="-- °C", font=("Arial", 11), foreground="darkgreen")
+                temp_label.pack(side=tk.LEFT, padx=5)
+                self.temp_labels.append(temp_label)
+                
+                # Store reference to update label dynamically
+                self.temp_display_labels = getattr(self, 'temp_display_labels', [])
+                self.temp_display_labels.append(channel_display_label)
                 
                 ttk.Label(temp_frame, text=f"Ch{i} (ai{start_channel + i}):", 
                          font=("Arial", 10, "bold"), width=12).pack(side=tk.LEFT, padx=5)
@@ -585,13 +651,13 @@ class ThermocopleDAQGUI:
             messagebox.showerror("Error", f"Failed to apply configuration:\n{str(e)}")
     
     def create_run_tab(self):
-        """Create the Run tab with full-size plot"""
+        """Create the Run tab with full-size plot and controls"""
         self.run_tab.columnconfigure(0, weight=1)
-        self.run_tab.rowconfigure(1, weight=1)
+        self.run_tab.rowconfigure(2, weight=1)
         
-        # ===== Top Control Bar =====
+        # ===== Top Control Bar - Row 1 =====
         self.control_bar = ttk.Frame(self.run_tab, padding="5")
-        self.control_bar.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.control_bar.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
         
         # Plot Time Window Control
         ttk.Label(self.control_bar, text="Time Window:", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
@@ -611,9 +677,82 @@ class ThermocopleDAQGUI:
         self.run_tab_channel_frame = ttk.Frame(self.control_bar)
         self.run_tab_channel_frame.pack(side=tk.LEFT)
         
+        # ===== Plot Customization Bar - Row 2 =====
+        customization_frame = ttk.LabelFrame(self.run_tab, text="Plot Customization", padding="5")
+        customization_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        
+        # Create two rows for controls
+        row1_frame = ttk.Frame(customization_frame)
+        row1_frame.pack(fill=tk.X, pady=2)
+        
+        row2_frame = ttk.Frame(customization_frame)
+        row2_frame.pack(fill=tk.X, pady=2)
+        
+        # Row 1: Titles
+        # Plot Title
+        ttk.Label(row1_frame, text="Plot Title:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        self.plot_title_var = tk.StringVar(value="Thermocouple Temperature vs Time")
+        ttk.Entry(row1_frame, textvariable=self.plot_title_var, width=30).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(row1_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Left Y-Axis Title
+        ttk.Label(row1_frame, text="Left Y-Axis:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        self.left_yaxis_title_var = tk.StringVar(value="Temperature (°C)")
+        ttk.Entry(row1_frame, textvariable=self.left_yaxis_title_var, width=20).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(row1_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Right Y-Axis Title
+        ttk.Label(row1_frame, text="Right Y-Axis:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        self.right_yaxis_title_var = tk.StringVar(value="Temperature (°C)")
+        ttk.Entry(row1_frame, textvariable=self.right_yaxis_title_var, width=20).pack(side=tk.LEFT, padx=5)
+        
+        # Row 2: Axis Ranges
+        # X-Axis Range (Time)
+        ttk.Label(row2_frame, text="X-Axis (Auto):", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        self.x_axis_auto_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2_frame, text="Auto", variable=self.x_axis_auto_var).pack(side=tk.LEFT, padx=2)
+        
+        ttk.Separator(row2_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Left Y-Axis Range
+        ttk.Label(row2_frame, text="Left Y-Axis:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        self.left_y_auto_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2_frame, text="Auto", variable=self.left_y_auto_var).pack(side=tk.LEFT, padx=2)
+        
+        ttk.Label(row2_frame, text="Min:").pack(side=tk.LEFT, padx=(10, 2))
+        self.left_y_min_var = tk.StringVar(value="0")
+        ttk.Entry(row2_frame, textvariable=self.left_y_min_var, width=8).pack(side=tk.LEFT, padx=2)
+        
+        ttk.Label(row2_frame, text="Max:").pack(side=tk.LEFT, padx=(5, 2))
+        self.left_y_max_var = tk.StringVar(value="100")
+        ttk.Entry(row2_frame, textvariable=self.left_y_max_var, width=8).pack(side=tk.LEFT, padx=2)
+        
+        ttk.Separator(row2_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Right Y-Axis Range
+        ttk.Label(row2_frame, text="Right Y-Axis:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        self.right_y_auto_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2_frame, text="Auto", variable=self.right_y_auto_var).pack(side=tk.LEFT, padx=2)
+        
+        ttk.Label(row2_frame, text="Min:").pack(side=tk.LEFT, padx=(10, 2))
+        self.right_y_min_var = tk.StringVar(value="0")
+        ttk.Entry(row2_frame, textvariable=self.right_y_min_var, width=8).pack(side=tk.LEFT, padx=2)
+        
+        ttk.Label(row2_frame, text="Max:").pack(side=tk.LEFT, padx=(5, 2))
+        self.right_y_max_var = tk.StringVar(value="100")
+        ttk.Entry(row2_frame, textvariable=self.right_y_max_var, width=8).pack(side=tk.LEFT, padx=2)
+        
+        ttk.Separator(row2_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Apply button
+        ttk.Button(row2_frame, text="Apply to Plot", command=self.apply_plot_settings, 
+                   width=15).pack(side=tk.LEFT, padx=10)
+        
         # ===== Main Plot =====
         plot_frame = ttk.Frame(self.run_tab)
-        plot_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        plot_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         plot_frame.columnconfigure(0, weight=1)
         plot_frame.rowconfigure(0, weight=1)
         
@@ -635,16 +774,24 @@ class ThermocopleDAQGUI:
         self.plot_lines = []
     
     def rebuild_run_tab_controls(self):
-        """Rebuild Run tab channel selection controls"""
+        """Rebuild Run tab channel selection controls with custom labels"""
         # Clear existing checkboxes
         for widget in self.run_tab_channel_frame.winfo_children():
             widget.destroy()
         
-        # Create new checkboxes
+        # Create new checkboxes with channel labels
         for i in range(len(self.channel_selection_vars)):
-            cb = ttk.Checkbutton(self.run_tab_channel_frame, text=f"Ch{i}", 
-                               variable=self.channel_selection_vars[i])
+            channel_label = self.channel_label_vars[i].get()
+            cb = ttk.Checkbutton(self.run_tab_channel_frame, 
+                               text=channel_label,  # Use custom label instead of "Ch{i}"
+                               variable=self.channel_selection_vars[i],
+                               command=self.update_run_tab_labels)  # Update when changed
             cb.pack(side=tk.LEFT, padx=2)
+    
+    def update_run_tab_labels(self):
+        """Update Run tab channel checkbox labels when channel names change"""
+        # This will be called when checkboxes need to update their labels
+        self.rebuild_run_tab_controls()
     
     def get_plot_style(self, channel_index):
         """Get linestyle and marker for a channel"""
@@ -939,6 +1086,9 @@ class ThermocopleDAQGUI:
             self.stop_button.config(state="normal")
             self.acquisition_running = True
             
+            # Disable configuration widgets
+            self.disable_config_widgets()
+            
             self.log_status("=== Acquisition Started ===")
             self.log_status(f"Rate: {self.acq_rate_var.get()}")
             self.log_status(f"Device: {self.device_name}")
@@ -960,7 +1110,14 @@ class ThermocopleDAQGUI:
         self.acquisition_running = False
         self.start_button.config(state="normal")
         self.stop_button.config(state="disabled")
+        
+        # Re-enable configuration widgets
+        self.enable_config_widgets()
+        
         self.log_status("=== Acquisition Stopped ===")
+        
+        # Close files
+        self.close_files()
         
         # Close files
         self.close_files()
@@ -1172,7 +1329,7 @@ class ThermocopleDAQGUI:
                     )
     
     def update_plot(self):
-        """Update plot periodically"""
+        """Update plot periodically with dual Y-axis support and custom settings"""
         if not self.acquisition_running:
             return
         
@@ -1204,24 +1361,46 @@ class ThermocopleDAQGUI:
                     plot_times = plot_times[::step]
                     plot_data = [data[::step] for data in plot_data]
             
-            # Update Main Plot (Run Tab)
-            unit_symbol = self.get_temp_unit_symbol()
-            self.ax.clear()
-            self.ax.set_xlabel("Time", fontsize=12)
-            self.ax.set_ylabel(f"Temperature ({unit_symbol})", fontsize=12)
-            self.ax.set_title("Thermocouple Temperature vs Time", fontsize=14, fontweight='bold')
-            self.ax.grid(True, alpha=0.3)
+            # Clear the figure
+            self.figure.clear()
             
-            # Plot selected channels
+            # Create primary axis
+            self.ax = self.figure.add_subplot(111)
+            
+            # Check if we need a secondary Y-axis
+            has_right_axis = any(self.channel_yaxis_vars[i].get() == "Right" 
+                                and self.channel_selection_vars[i].get() 
+                                for i in range(self.num_channels))
+            
+            # Create secondary axis if needed
+            if has_right_axis:
+                ax_right = self.ax.twinx()
+            else:
+                ax_right = None
+            
+            # Plot channels on appropriate axes
+            left_plotted = False
+            right_plotted = False
+            
             for i in range(self.num_channels):
                 if self.channel_selection_vars[i].get():
                     linestyle, marker = self.get_plot_style(i)
                     color = self.channel_color_vars[i].get()
                     label = self.channel_label_vars[i].get()
+                    yaxis_side = self.channel_yaxis_vars[i].get()
                     
+                    # Choose which axis to plot on
+                    if yaxis_side == "Right" and ax_right is not None:
+                        current_ax = ax_right
+                        right_plotted = True
+                    else:
+                        current_ax = self.ax
+                        left_plotted = True
+                    
+                    # Plot the data
                     if marker:
                         markersize = 4 if linestyle else 6
-                        self.ax.plot(plot_times, plot_data[i], 
+                        current_ax.plot(plot_times, plot_data[i], 
                                    color=color,
                                    linestyle=linestyle if linestyle else 'None',
                                    marker=marker,
@@ -1229,22 +1408,76 @@ class ThermocopleDAQGUI:
                                    label=label, 
                                    linewidth=2)
                     else:
-                        self.ax.plot(plot_times, plot_data[i], 
+                        current_ax.plot(plot_times, plot_data[i], 
                                    color=color,
                                    linestyle=linestyle,
                                    label=label, 
                                    linewidth=2)
             
-            self.ax.legend(loc='best', fontsize=10, framealpha=0.9)
+            # Apply custom plot title
+            plot_title = self.plot_title_var.get()
+            self.ax.set_title(plot_title, fontsize=14, fontweight='bold')
+            
+            # Configure X-axis
+            self.ax.set_xlabel("Time", fontsize=12)
+            if not self.x_axis_auto_var.get():
+                # X-axis is time-based, auto is typically desired
+                pass
+            
+            # Configure left Y-axis
+            left_ylabel = self.left_yaxis_title_var.get()
+            self.ax.set_ylabel(left_ylabel, fontsize=12, color='black')
+            self.ax.tick_params(axis='y', labelcolor='black')
+            self.ax.grid(True, alpha=0.3)
+            
+            # Apply left Y-axis limits if not auto
+            if not self.left_y_auto_var.get():
+                try:
+                    left_min = float(self.left_y_min_var.get())
+                    left_max = float(self.left_y_max_var.get())
+                    self.ax.set_ylim(left_min, left_max)
+                except ValueError:
+                    pass  # Use auto if invalid values
+            
+            # Configure right Y-axis if it exists
+            if ax_right is not None and right_plotted:
+                right_ylabel = self.right_yaxis_title_var.get()
+                ax_right.set_ylabel(right_ylabel, fontsize=12, color='black')
+                ax_right.tick_params(axis='y', labelcolor='black')
+                
+                # Apply right Y-axis limits if not auto
+                if not self.right_y_auto_var.get():
+                    try:
+                        right_min = float(self.right_y_min_var.get())
+                        right_max = float(self.right_y_max_var.get())
+                        ax_right.set_ylim(right_min, right_max)
+                    except ValueError:
+                        pass  # Use auto if invalid values
+            
+            # Combine legends from both axes
+            if left_plotted or right_plotted:
+                lines_1, labels_1 = self.ax.get_legend_handles_labels()
+                if ax_right is not None and right_plotted:
+                    lines_2, labels_2 = ax_right.get_legend_handles_labels()
+                    lines = lines_1 + lines_2
+                    labels = labels_1 + labels_2
+                else:
+                    lines = lines_1
+                    labels = labels_1
+                
+                self.ax.legend(lines, labels, loc='best', fontsize=10, framealpha=0.9)
+            
             self.figure.autofmt_xdate()
             self.canvas.draw()
             
         except Exception as e:
             print(f"Plot update error: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Schedule next update
         self.root.after(1000, self.update_plot)
-    
+        
     def on_closing(self):
         """Handle window closing"""
         if self.acquisition_running:
@@ -1253,7 +1486,132 @@ class ThermocopleDAQGUI:
                 self.root.destroy()
         else:
             self.root.destroy()
+            
+    def disable_config_widgets(self):
+        """Disable configuration widgets during acquisition"""
+        # Disable all widgets in column 1 (recursively)
+        if hasattr(self, 'col1_frame'):
+            self._disable_widget_recursive(self.col1_frame)
+        
+        # Disable channel name entry boxes
+        for entry in self.channel_name_entries:
+            entry.config(state='disabled')
+        
+        self.log_status("Configuration locked during acquisition")
+    
+    def enable_config_widgets(self):
+        """Enable configuration widgets after acquisition stops"""
+        # Enable all widgets in column 1 (recursively)
+        if hasattr(self, 'col1_frame'):
+            self._enable_widget_recursive(self.col1_frame)
+        
+        # Enable channel name entry boxes
+        for entry in self.channel_name_entries:
+            entry.config(state='normal')
+        
+        self.log_status("Configuration unlocked")
+    
+    def _disable_widget_recursive(self, widget):
+        """Recursively disable a widget and all its children"""
+        try:
+            # Try to disable the widget
+            if isinstance(widget, (ttk.Entry, ttk.Combobox, ttk.Spinbox)):
+                widget.config(state='disabled')
+            elif isinstance(widget, (ttk.Button, ttk.Checkbutton)):
+                widget.config(state='disabled')
+            elif isinstance(widget, tk.Text):
+                widget.config(state='disabled')
+        except:
+            pass
+        
+        # Recursively disable children
+        try:
+            for child in widget.winfo_children():
+                self._disable_widget_recursive(child)
+        except:
+            pass
+    
+    def _enable_widget_recursive(self, widget):
+        """Recursively enable a widget and all its children"""
+        try:
+            # Try to enable the widget
+            if isinstance(widget, (ttk.Entry, ttk.Spinbox)):
+                widget.config(state='normal')
+            elif isinstance(widget, ttk.Combobox):
+                widget.config(state='readonly')
+            elif isinstance(widget, (ttk.Button, ttk.Checkbutton)):
+                widget.config(state='normal')
+            elif isinstance(widget, tk.Text):
+                widget.config(state='normal')
+        except:
+            pass
+        
+        # Recursively enable children
+        try:
+            for child in widget.winfo_children():
+                self._enable_widget_recursive(child)
+        except:
+            pass
 
+    def apply_plot_settings(self):
+        """Apply user-defined plot settings"""
+        try:
+            # Validate and store the settings
+            if not self.left_y_auto_var.get():
+                try:
+                    left_min = float(self.left_y_min_var.get())
+                    left_max = float(self.left_y_max_var.get())
+                    if left_min >= left_max:
+                        messagebox.showerror("Error", "Left Y-Axis: Min must be less than Max")
+                        return
+                except ValueError:
+                    messagebox.showerror("Error", "Left Y-Axis: Invalid numeric values")
+                    return
+            
+            if not self.right_y_auto_var.get():
+                try:
+                    right_min = float(self.right_y_min_var.get())
+                    right_max = float(self.right_y_max_var.get())
+                    if right_min >= right_max:
+                        messagebox.showerror("Error", "Right Y-Axis: Min must be less than Max")
+                        return
+                except ValueError:
+                    messagebox.showerror("Error", "Right Y-Axis: Invalid numeric values")
+                    return
+            
+            self.log_status("Plot settings applied")
+            
+            # Force immediate plot update if acquisition is running
+            if self.acquisition_running:
+                self.root.after(100, self.force_plot_update)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to apply plot settings:\n{str(e)}")
+            self.log_status(f"Error applying plot settings: {str(e)}")
+    
+    def force_plot_update(self):
+        """Force an immediate plot update with current data"""
+        if not self.acquisition_running:
+            return
+        
+        # Just trigger update_plot immediately
+        self.update_plot()
+
+    def on_channel_label_change(self, channel_index):
+        """Called when a channel label is changed"""
+        # Rebuild Run tab controls to reflect new label
+        if hasattr(self, 'run_tab_channel_frame'):
+            self.root.after(100, self.rebuild_run_tab_controls)
+        
+        # Update temperature display labels
+        self.root.after(100, self.update_temp_display_labels)
+
+    def update_temp_display_labels(self):
+        """Update temperature display labels to match channel names"""
+        if hasattr(self, 'temp_display_labels') and hasattr(self, 'channel_label_vars'):
+            for i in range(min(len(self.temp_display_labels), len(self.channel_label_vars))):
+                label_text = self.channel_label_vars[i].get()
+                self.temp_display_labels[i].config(text=f"{label_text}:")
 
 def main():
     root = tk.Tk()
