@@ -16,6 +16,89 @@ import matplotlib.dates as mdates
 # Excel date conversion constant (Excel epoch: January 1, 1900)
 EXCEL_EPOCH = datetime(1899, 12, 30)  # Note: Excel incorrectly treats 1900 as a leap year
 
+
+def intelligent_downsample(x_data, y_data, max_points=100000):
+    """
+    Intelligently downsample data preserving important features.
+    Uses a simple but effective min-max decimation approach.
+    
+    Args:
+        x_data: X-axis data (time/index)
+        y_data: Y-axis data (values)
+        max_points: Target maximum number of points
+    
+    Returns:
+        Tuple of (downsampled_x, downsampled_y)
+    """
+    n = len(y_data)
+    
+    # If data is already smaller than target, return as-is
+    if n <= max_points:
+        return x_data, y_data
+    
+    # Calculate how many points to group together
+    # Keep it simple: aim for max_points / 2 groups (each group contributes min + max)
+    num_groups = max_points // 2
+    group_size = n // num_groups
+    
+    if group_size < 2:
+        # If groups are too small, just uniformly sample
+        indices = np.linspace(0, n-1, max_points, dtype=int)
+        return x_data[indices], y_data[indices]
+    
+    # Collect indices to keep
+    keep_indices = [0]  # Always keep first point
+    
+    # For each group, keep the min and max points
+    for i in range(0, n - group_size, group_size):
+        group_end = min(i + group_size, n)
+        group_y = y_data[i:group_end]
+        
+        # Find min and max within this group
+        local_min_idx = i + np.argmin(group_y)
+        local_max_idx = i + np.argmax(group_y)
+        
+        # Add both (order matters for visual smoothness)
+        if local_min_idx < local_max_idx:
+            keep_indices.extend([local_min_idx, local_max_idx])
+        else:
+            keep_indices.extend([local_max_idx, local_min_idx])
+    
+    # Always keep last point
+    if (n - 1) not in keep_indices:
+        keep_indices.append(n - 1)
+    
+    # Remove duplicates and sort
+    keep_indices = sorted(set(keep_indices))
+    
+    # Convert to numpy array for efficient indexing
+    keep_indices = np.array(keep_indices, dtype=int)
+    
+    return x_data[keep_indices], y_data[keep_indices]
+
+
+def estimate_data_size(num_points):
+    """
+    Estimate time metrics for data visualization.
+    
+    Args:
+        num_points: Number of data points
+    
+    Returns:
+        Dictionary with estimates
+    """
+    days = num_points / (24 * 3600)  # Assuming 1Hz sampling
+    megapoints = num_points / 1_000_000
+    
+    # Rough estimate: ~2 seconds per million points per channel
+    estimated_time_per_channel = (num_points / 1_000_000) * 2
+    
+    return {
+        'days': days,
+        'megapoints': megapoints,
+        'estimated_time_per_channel': estimated_time_per_channel
+    }
+
 # Try to import nptdms for TDMS support
 try:
     from nptdms import TdmsFile
@@ -123,6 +206,10 @@ class CSVPlotter:
         # defaults
         self.default_plot_width = 12.0
         self.default_plot_height = 8.0
+        
+        # Preview plot size (separate from export size)
+        self.default_preview_width = 6.0
+        self.default_preview_height = 4.0
 
         # preview scheduling
         self._preview_after_id = None
@@ -133,6 +220,10 @@ class CSVPlotter:
         self.live_preview_var = tk.BooleanVar(value=True)
         self.downsample_live_var = tk.BooleanVar(value=True)
         self.max_preview_points = tk.IntVar(value=5000)
+        
+        # Export downsampling
+        self.downsample_export_var = tk.BooleanVar(value=False)
+        self.max_export_points = tk.IntVar(value=100000)
         self.marker_size = tk.DoubleVar(value=6.0)
         self.global_line_width = tk.DoubleVar(value=1.0)
         self.left_axis_color = tk.StringVar(value="#000000")
@@ -473,13 +564,13 @@ class CSVPlotter:
         preview_frame.pack(pady=5, fill="both", expand=True)
         self.preview_canvas_container = tk.Frame(preview_frame)
         self.preview_canvas_container.pack(fill="both", expand=True)
-        
-        self.fig = plt.Figure(figsize=(self.default_plot_width, self.default_plot_height))
+
+        self.fig = plt.Figure(figsize=(self.default_preview_width, self.default_preview_height))
         self.ax = self.fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.preview_canvas_container)
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.pack(side="left", fill="both", expand=True)
-        
+
         controls_frame = ttk.Frame(preview_frame)
         controls_frame.pack(anchor="w", pady=2, fill="x")
         ttk.Checkbutton(controls_frame, text="Enable Live Preview", variable=self.live_preview_var, command=self._on_live_toggle).grid(row=0, column=0, padx=(2,8), sticky="w")
@@ -489,15 +580,34 @@ class CSVPlotter:
         self.max_pts_spin.grid(row=0, column=3, padx=(2,8)); self.max_pts_spin.bind("<KeyRelease>", lambda e: self.schedule_preview())
         ttk.Button(controls_frame, text="Preview Plot", command=lambda: self._explicit_preview()).grid(row=0, column=4, padx=(2,8))
         ttk.Button(controls_frame, text="Cancel Preview", command=self.cancel_preview).grid(row=0, column=5, padx=(2,8))
-        
-        size_frame = ttk.Frame(preview_frame); size_frame.pack(anchor="w", pady=2, fill="x")
-        ttk.Label(size_frame, text="Plot Width (inches):").grid(row=0, column=0)
+
+        # Preview size controls (separate from export size)
+        preview_size_frame = ttk.Frame(preview_frame); preview_size_frame.pack(anchor="w", pady=2, fill="x")
+        ttk.Label(preview_size_frame, text="Preview Size (inches):").grid(row=0, column=0, padx=(2,5))
+        ttk.Label(preview_size_frame, text="Width:").grid(row=0, column=1)
+        self.preview_width = tk.DoubleVar(value=self.default_preview_width)
+        w_preview = ttk.Entry(preview_size_frame, textvariable=self.preview_width, width=6)
+        w_preview.grid(row=0, column=2, padx=2)
+        w_preview.bind("<KeyRelease>", lambda e: self.schedule_preview())
+        ttk.Label(preview_size_frame, text="Height:").grid(row=0, column=3, padx=(8,0))
+        self.preview_height = tk.DoubleVar(value=self.default_preview_height)
+        h_preview = ttk.Entry(preview_size_frame, textvariable=self.preview_height, width=6)
+        h_preview.grid(row=0, column=4, padx=2)
+        h_preview.bind("<KeyRelease>", lambda e: self.schedule_preview())
+        ttk.Button(preview_size_frame, text="Apply Preview Size", command=self.preview_plot).grid(row=0, column=5, padx=6)
+
+        # Export size controls (for PNG save)
+        export_size_frame = ttk.Frame(preview_frame); export_size_frame.pack(anchor="w", pady=2, fill="x")
+        ttk.Label(export_size_frame, text="Export Size (inches):").grid(row=0, column=0, padx=(2,5))
+        ttk.Label(export_size_frame, text="Width:").grid(row=0, column=1)
         self.plot_width = tk.DoubleVar(value=self.default_plot_width)
-        w_plot = ttk.Entry(size_frame, textvariable=self.plot_width, width=6); w_plot.grid(row=0, column=1); w_plot.bind("<KeyRelease>", lambda e: self.schedule_preview())
-        ttk.Label(size_frame, text="Plot Height (inches):").grid(row=0, column=2)
+        w_plot = ttk.Entry(export_size_frame, textvariable=self.plot_width, width=6)
+        w_plot.grid(row=0, column=2, padx=2)
+        ttk.Label(export_size_frame, text="Height:").grid(row=0, column=3, padx=(8,0))
         self.plot_height = tk.DoubleVar(value=self.default_plot_height)
-        h_plot = ttk.Entry(size_frame, textvariable=self.plot_height, width=6); h_plot.grid(row=0, column=3); h_plot.bind("<KeyRelease>", lambda e: self.schedule_preview())
-        ttk.Button(size_frame, text="Preview Plot", command=self.preview_plot).grid(row=0, column=4, padx=6)
+        h_plot = ttk.Entry(export_size_frame, textvariable=self.plot_height, width=6)
+        h_plot.grid(row=0, column=4, padx=2)
+        ttk.Label(export_size_frame, text="(Used for PNG export)", font=("TkDefaultFont", 8), foreground="gray").grid(row=0, column=5, padx=6, sticky="w")
         
         # Configuration & Save
         config_frame = ttk.LabelFrame(self.preview_parent, text="Configuration"); config_frame.pack(pady=5, fill="x")
@@ -506,9 +616,48 @@ class CSVPlotter:
         ttk.Button(config_frame, text="Reset All", command=self.reset_all).pack(side="right", padx=4)
         
         save_frame = ttk.LabelFrame(self.preview_parent, text="Save Plot"); save_frame.pack(pady=5, fill="x")
-        ttk.Label(save_frame, text="Select PNG Quality (DPI):").pack(side="left")
-        self.dpi_option = ttk.Combobox(save_frame, values=[100,150,200,300,600], state="readonly"); self.dpi_option.current(2); self.dpi_option.pack(side="left", padx=5)
-        ttk.Button(save_frame, text="Save PNG", command=self.save_png).pack(side="left", padx=5)
+        
+        # First row: DPI and Save button
+        save_row1 = ttk.Frame(save_frame)
+        save_row1.pack(fill="x", padx=5, pady=5)
+        ttk.Label(save_row1, text="PNG Quality (DPI):").pack(side="left")
+        self.dpi_option = ttk.Combobox(save_row1, values=[100,150,200,300,600], state="readonly", width=8)
+        self.dpi_option.current(2)
+        self.dpi_option.pack(side="left", padx=5)
+        ttk.Button(save_row1, text="Save PNG", command=self.save_png).pack(side="left", padx=5)
+        
+        # Second row: Downsampling options
+        save_row2 = ttk.Frame(save_frame)
+        save_row2.pack(fill="x", padx=5, pady=(0,5))
+        
+        self.downsample_export_cb = ttk.Checkbutton(
+            save_row2, 
+            text="Intelligent Downsample for Export (preserves peaks/changes)", 
+            variable=self.downsample_export_var
+        )
+        self.downsample_export_cb.pack(side="left", padx=(0,10))
+        
+        ttk.Label(save_row2, text="Max points/channel:").pack(side="left")
+        self.max_export_spin = ttk.Spinbox(
+            save_row2, 
+            from_=10000, 
+            to=1000000, 
+            increment=10000,
+            textvariable=self.max_export_points, 
+            width=10
+        )
+        self.max_export_spin.pack(side="left", padx=5)
+        
+        # Third row: Data size info
+        save_row3 = ttk.Frame(save_frame)
+        save_row3.pack(fill="x", padx=5, pady=(0,5))
+        self.data_info_label = ttk.Label(
+            save_row3, 
+            text="Note: ~200 days @ 1Hz = ~17 million points. Downsampling recommended for large datasets.",
+            foreground="blue",
+            font=("TkDefaultFont", 8)
+        )
+        self.data_info_label.pack(side="left")
 
         # Progress Bar and Status Window
         progress_frame = ttk.LabelFrame(self.preview_parent, text="Progress & Status")
@@ -855,6 +1004,9 @@ class CSVPlotter:
         """Populate combo boxes and listboxes from loaded DataFrame"""
         if self.df is None:
             return
+        
+        # Update data size information
+        self.update_data_size_info()
             
         # Populate column selectors
         columns = list(self.df.columns)
@@ -893,6 +1045,41 @@ class CSVPlotter:
         self.reset_line_properties()
         self.reset_right_line_properties()
         self.reset_right2_line_properties()
+    
+    def update_data_size_info(self):
+        """Update the data size information label"""
+        if self.df is None:
+            return
+        
+        try:
+            num_points = len(self.df)
+            estimates = estimate_data_size(num_points)
+            
+            days = estimates['days']
+            megapoints = estimates['megapoints']
+            est_time = estimates['estimated_time_per_channel']
+            
+            # Update label with current data info
+            info_text = (
+                f"Current data: {megapoints:.2f}M points ({days:.1f} days @ 1Hz). "
+                f"Est. export time: ~{est_time:.0f}s/channel at full resolution."
+            )
+            
+            # Add recommendation if data is large
+            if num_points > 1_000_000:
+                info_text += " ⚠️ Downsampling recommended!"
+                self.data_info_label.config(foreground="red")
+                # Auto-enable downsampling for large datasets
+                if not self.downsample_export_var.get():
+                    self.downsample_export_var.set(True)
+                    self.update_status(f"Auto-enabled export downsampling (data size: {megapoints:.2f}M points)")
+            else:
+                self.data_info_label.config(foreground="blue")
+            
+            self.data_info_label.config(text=info_text)
+            
+        except Exception as e:
+            self.data_info_label.config(text="Note: ~200 days @ 1Hz = ~17 million points.")
     
     # small helper for section-specific scrolling
     def _section_mousewheel(self, event, canvas_widget, inner_frame):
@@ -1444,12 +1631,13 @@ class CSVPlotter:
                     pass
             right2_labels.append(label)
 
+        # Use preview size for preview window
         try:
-            pw = float(self.plot_width.get())
-            ph = float(self.plot_height.get())
+            pw = float(self.preview_width.get())
+            ph = float(self.preview_height.get())
         except Exception:
-            pw = self.default_plot_width
-            ph = self.default_plot_height
+            pw = self.default_preview_width
+            ph = self.default_preview_height
 
         n_rows = len(self.df.index) if self.df is not None else 0
         do_downsample = (not explicit) and self.downsample_live_var.get() and (n_rows > max(1, self.max_preview_points.get()))
@@ -1800,6 +1988,8 @@ class CSVPlotter:
         config['downsample_live'] = bool(self.downsample_live_var.get())
         config['max_preview_points'] = int(self.max_preview_points.get())
         config['marker_size'] = float(self.marker_size.get())
+        config['preview_width'] = float(self.preview_width.get())
+        config['preview_height'] = float(self.preview_height.get())
         config['plot_width'] = float(self.plot_width.get())
         config['plot_height'] = float(self.plot_height.get())
         config['global_line_width'] = float(self.global_line_width.get())
@@ -1959,6 +2149,12 @@ class CSVPlotter:
             
             try:
                 self.marker_size.set(float(cfg.get('marker_size', self.marker_size.get())))
+            except Exception:
+                pass
+            
+            try:
+                self.preview_width.set(float(cfg.get('preview_width', self.preview_width.get())))
+                self.preview_height.set(float(cfg.get('preview_height', self.preview_height.get())))
             except Exception:
                 pass
             
@@ -2124,12 +2320,31 @@ class CSVPlotter:
 
         # Plot left axis
         self.update_progress(20, "Preparing data for export...")
+        
+        # Get downsampling settings
+        use_downsampling = self.downsample_export_var.get()
+        max_export_pts = self.max_export_points.get()
+        
+        # Calculate total channels for progress tracking
+        total_channels = len(y_cols) + len(right_cols) + len(right2_cols)
+        current_channel = 0
+        
         # Prepare X-axis data once
-        x_data = self.df[x_col].values
-        if pd.api.types.is_datetime64_any_dtype(x_data):
-            x_data = mdates.date2num(pd.to_datetime(x_data))
+        x_data_original = self.df[x_col].values.copy()
+        if pd.api.types.is_datetime64_any_dtype(x_data_original):
+            x_data_original = mdates.date2num(pd.to_datetime(x_data_original))
+        
+        # Show data size info
+        num_points = len(x_data_original)
+        if use_downsampling:
+            self.update_status(f"Export downsampling ENABLED: {num_points:,} → ~{max_export_pts:,} points/channel")
+        else:
+            self.update_status(f"Export downsampling DISABLED: Using all {num_points:,} points (may take several minutes)")
         
         for y_col, row in zip(y_cols, self.line_properties_frames):
+            current_channel += 1
+            progress = 20 + (current_channel / total_channels) * 50  # 20-70% for plotting
+            self.update_progress(progress, f"Plotting channel {current_channel}/{total_channels}: {y_col}")
             try:
                 # Check if scatter mode is enabled
                 is_scatter = hasattr(row, 'scatter_mode') and row.scatter_mode.get()
@@ -2140,17 +2355,27 @@ class CSVPlotter:
                 if is_scatter and (marker is None or marker == "None"):
                     marker = "o"
                 
-                ydata = self.df[y_col].values.astype(float)
+                # Get Y data
+                ydata_original = self.df[y_col].values.astype(float)
+                
+                # Apply intelligent downsampling if enabled
+                if use_downsampling and len(ydata_original) > max_export_pts:
+                    x_plot, y_plot = intelligent_downsample(x_data_original, ydata_original, max_export_pts)
+                    self.update_status(f"  {y_col}: {len(ydata_original):,} → {len(y_plot):,} points")
+                else:
+                    x_plot = x_data_original
+                    y_plot = ydata_original
+                
                 mcolor = getattr(row, "marker_color", "") or row.line_color
                 
                 # Scatter mode: no line, only markers
                 if is_scatter:
-                    ax_save.scatter(x_data, ydata, s=self.marker_size.get()**2, 
+                    ax_save.scatter(x_plot, y_plot, s=self.marker_size.get()**2, 
                                    c=mcolor, marker=marker, label=row._linked_label_var.get(), 
                                    edgecolors=mcolor)
                 else:
                     ax_save.plot(
-                        x_data, ydata,
+                        x_plot, y_plot,
                         linestyle=row.line_style.get(),
                         linewidth=global_lw,
                         color=row.line_color,
@@ -2160,7 +2385,8 @@ class CSVPlotter:
                         markeredgecolor=mcolor,
                         label=row._linked_label_var.get()
                     )
-            except Exception:
+            except Exception as e:
+                self.update_status(f"  ERROR plotting {y_col}: {e}")
                 continue
 
         try:
@@ -2175,9 +2401,12 @@ class CSVPlotter:
         
         ax2_save = None
         if right_cols:
-            self.update_progress(50, "Plotting right Y-axis 1 data...")
             ax2_save = ax_save.twinx()
             for y_col, row in zip(right_cols, self.right_line_properties_frames):
+                current_channel += 1
+                progress = 20 + (current_channel / total_channels) * 50
+                self.update_progress(progress, f"Plotting channel {current_channel}/{total_channels}: {y_col}")
+                
                 try:
                     # Check if scatter mode is enabled
                     is_scatter = hasattr(row, 'scatter_mode') and row.scatter_mode.get()
@@ -2188,17 +2417,27 @@ class CSVPlotter:
                     if is_scatter and (marker is None or marker == "None"):
                         marker = "o"
                     
-                    ydata = self.df[y_col].values.astype(float)
+                    # Get Y data
+                    ydata_original = self.df[y_col].values.astype(float)
+                    
+                    # Apply intelligent downsampling if enabled
+                    if use_downsampling and len(ydata_original) > max_export_pts:
+                        x_plot, y_plot = intelligent_downsample(x_data_original, ydata_original, max_export_pts)
+                        self.update_status(f"  {y_col}: {len(ydata_original):,} → {len(y_plot):,} points")
+                    else:
+                        x_plot = x_data_original
+                        y_plot = ydata_original
+                    
                     mcolor = getattr(row, "marker_color", "") or row.line_color
                     
                     # Scatter mode: no line, only markers
                     if is_scatter:
-                        ax2_save.scatter(x_data, ydata, s=self.marker_size.get()**2, 
+                        ax2_save.scatter(x_plot, y_plot, s=self.marker_size.get()**2, 
                                        c=mcolor, marker=marker, label=row._linked_label_var.get(), 
                                        edgecolors=mcolor)
                     else:
                         ax2_save.plot(
-                            x_data, ydata,
+                            x_plot, y_plot,
                             linestyle=row.line_style.get(),
                             linewidth=global_lw,
                             color=row.line_color,
@@ -2208,7 +2447,8 @@ class CSVPlotter:
                             markeredgecolor=mcolor,
                             label=row._linked_label_var.get()
                         )
-                except Exception:
+                except Exception as e:
+                    self.update_status(f"  ERROR plotting {y_col}: {e}")
                     continue
             try:
                 right_col = self.right_axis_color.get()
@@ -2227,7 +2467,6 @@ class CSVPlotter:
 
         ax3_save = None
         if right2_cols:
-            self.update_progress(60, "Plotting right Y-axis 2 data...")
             ax3_save = ax_save.twinx()
             try:
                 pos = float(self.right2_pos.get())
@@ -2235,6 +2474,10 @@ class CSVPlotter:
             except Exception:
                 pass
             for y_col, row in zip(right2_cols, self.right2_line_properties_frames):
+                current_channel += 1
+                progress = 20 + (current_channel / total_channels) * 50
+                self.update_progress(progress, f"Plotting channel {current_channel}/{total_channels}: {y_col}")
+                
                 try:
                     # Check if scatter mode is enabled
                     is_scatter = hasattr(row, 'scatter_mode') and row.scatter_mode.get()
@@ -2245,17 +2488,27 @@ class CSVPlotter:
                     if is_scatter and (marker is None or marker == "None"):
                         marker = "o"
                     
-                    ydata = self.df[y_col].values.astype(float)
+                    # Get Y data
+                    ydata_original = self.df[y_col].values.astype(float)
+                    
+                    # Apply intelligent downsampling if enabled
+                    if use_downsampling and len(ydata_original) > max_export_pts:
+                        x_plot, y_plot = intelligent_downsample(x_data_original, ydata_original, max_export_pts)
+                        self.update_status(f"  {y_col}: {len(ydata_original):,} → {len(y_plot):,} points")
+                    else:
+                        x_plot = x_data_original
+                        y_plot = ydata_original
+                    
                     mcolor = getattr(row, "marker_color", "") or row.line_color
                     
                     # Scatter mode: no line, only markers
                     if is_scatter:
-                        ax3_save.scatter(x_data, ydata, s=self.marker_size.get()**2, 
+                        ax3_save.scatter(x_plot, y_plot, s=self.marker_size.get()**2, 
                                        c=mcolor, marker=marker, label=row._linked_label_var.get(), 
                                        edgecolors=mcolor)
                     else:
                         ax3_save.plot(
-                            x_data, ydata,
+                            x_plot, y_plot,
                             linestyle=row.line_style.get(),
                             linewidth=global_lw,
                             color=row.line_color,
@@ -2265,7 +2518,8 @@ class CSVPlotter:
                             markeredgecolor=mcolor,
                             label=row._linked_label_var.get()
                         )
-                except Exception:
+                except Exception as e:
+                    self.update_status(f"  ERROR plotting {y_col}: {e}")
                     continue
             try:
                 right2_col = self.right2_axis_color.get()
@@ -2429,11 +2683,23 @@ class CSVPlotter:
             dpi = 200
         
         try:
-            self.update_progress(90, f"Saving PNG at {dpi} DPI...")
+            self.update_progress(75, f"Rendering plot at {dpi} DPI (this may take a moment)...")
             fig_save.savefig(filename, dpi=dpi, bbox_inches="tight")
             plt.close(fig_save)
-            self.update_progress(100, f"Plot saved successfully: {os.path.basename(filename)}")
-            messagebox.showinfo("Saved", f"Plot saved as {filename} at {dpi} DPI")
+            
+            # Calculate file size
+            try:
+                file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+                size_info = f" ({file_size_mb:.2f} MB)"
+            except:
+                size_info = ""
+            
+            success_msg = f"Plot saved: {os.path.basename(filename)}{size_info}"
+            if use_downsampling:
+                success_msg += f" [Downsampled to ~{max_export_pts:,} pts/channel]"
+            
+            self.update_progress(100, success_msg)
+            messagebox.showinfo("Saved", f"Plot saved as {filename} at {dpi} DPI{size_info}")
         except Exception as e:
             self.update_status(f"ERROR: Failed to save plot - {e}")
             messagebox.showerror("Save Error", str(e))
@@ -2469,6 +2735,8 @@ class CSVPlotter:
             self.max_preview_points.set(5000)
             self.global_line_width.set(1.0)
             self.marker_size.set(6.0)
+            self.preview_width.set(self.default_preview_width)
+            self.preview_height.set(self.default_preview_height)
             self.plot_width.set(self.default_plot_width)
             self.plot_height.set(self.default_plot_height)
             self.right2_pos.set(1.2)
