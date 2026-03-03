@@ -2612,33 +2612,33 @@ class ThermocopleDAQGUI:
     
         self.root.after(refresh_s * 1000, self.update_plot_from_ring)
 
-def get_stats_window_snapshot(self):
-    """For stats: returns (data_raw_window, n_raw, stride_for_info, hz_for_info)."""
-    if self.ring is None or self.ring.count == 0:
-        return None, 0, 1, 1.0
-
-    window_s = self.get_time_window_seconds()
-    snap = self.ring.snapshot_last(min(self.ring.count, self.ring.capacity))
-    if snap.count == 0:
-        return None, 0, 1, 1.0
-
-    t_end = snap.times[-1]
-    t_start = t_end - window_s
-    idx0 = int(np.searchsorted(snap.times, t_start, side="left"))
-
-    data = snap.data[:, idx0:]
-    n_raw = data.shape[1]
-
-    # These are only for informational purposes (not required for stats correctness)
-    max_pts = int(self.max_plot_points_per_channel)
-    stride = int(np.ceil(n_raw / max_pts)) if n_raw > max_pts else 1
-
-    try:
-        hz = float(self.acquisition_rate) if self.acquisition_rate and self.acquisition_rate > 0 else 1.0
-    except Exception:
-        hz = 1.0
-
-    return data, n_raw, stride, hz
+    def get_stats_window_snapshot(self):
+        """For stats: returns (data_raw_window, n_raw, stride_for_info, hz_for_info)."""
+        if self.ring is None or self.ring.count == 0:
+            return None, 0, 1, 1.0
+    
+        window_s = self.get_time_window_seconds()
+        snap = self.ring.snapshot_last(min(self.ring.count, self.ring.capacity))
+        if snap.count == 0:
+            return None, 0, 1, 1.0
+    
+        t_end = snap.times[-1]
+        t_start = t_end - window_s
+        idx0 = int(np.searchsorted(snap.times, t_start, side="left"))
+    
+        data = snap.data[:, idx0:]
+        n_raw = data.shape[1]
+    
+        # These are only for informational purposes (not required for stats correctness)
+        max_pts = int(self.max_plot_points_per_channel)
+        stride = int(np.ceil(n_raw / max_pts)) if n_raw > max_pts else 1
+    
+        try:
+            hz = float(self.acquisition_rate) if self.acquisition_rate and self.acquisition_rate > 0 else 1.0
+        except Exception:
+            hz = 1.0
+    
+        return data, n_raw, stride, hz
 
     def stats_timer_loop(self):
         if not self.acquisition_running:
