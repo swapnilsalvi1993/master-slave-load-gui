@@ -194,6 +194,8 @@ class ThermocopleDAQGUI:
         self.plot_refresh_interval_var = tk.StringVar(value="2 sec")  # default
         self.plot_info_var = tk.StringVar(value="Plot: --/-- pts | stride=-- | eff.rate=-- Hz")
         
+        self.plot_needs_rebuild = False
+        
         # Create GUI
         self.create_widgets()
         
@@ -1268,6 +1270,9 @@ class ThermocopleDAQGUI:
             # Start acquisition thread
             self.acq_thread = threading.Thread(target=self.acquisition_loop, daemon=True)
             self.acq_thread.start()
+            
+            # Start stats update loop (NEW)
+            self.stats_timer_loop()
             
             # Start plot update timer
             self.update_plot_from_ring()
@@ -2499,6 +2504,15 @@ class ThermocopleDAQGUI:
         refresh_s = self.get_plot_refresh_seconds()
     
         try:
+            x, data_ds, n_raw, stride, hz = self.get_window_snapshot()
+            if data_ds is None or len(x) == 0:
+                self.root.after(self.get_plot_refresh_seconds() * 1000, self.update_plot_from_ring)
+                return
+            
+            n_ds = data_ds.shape[1]
+            eff_rate = hz / stride if stride > 0 else hz
+            
+            
             if self.ring is None or self.ring.count == 0:
                 self.root.after(refresh_s * 1000, self.update_plot_from_ring)
                 return
@@ -2578,7 +2592,11 @@ class ThermocopleDAQGUI:
                 else:
                     y_left_min = ymin if y_left_min is None else min(y_left_min, ymin)
                     y_left_max = ymax if y_left_max is None else max(y_left_max, ymax)
-    
+            
+            if self.plot_needs_rebuild:
+                self.plot_needs_rebuild = False
+                self.init_plot_lines()
+                
             # X-axis handling
             if self.x_axis_auto_var.get():
                 self.ax.set_xlim(x[0], x[-1])
@@ -2634,6 +2652,91 @@ class ThermocopleDAQGUI:
             pass
     
         self.root.after(refresh_s * 1000, self.update_plot_from_ring)
+
+    def get_window_snapshot(self):
+        """
+        Returns (times_ds, data_ds, n_raw, stride, hz) for the current time-window,
+        downsampled to max_plot_points_per_channel.
+        times_ds are datetime objects for plotting/stats display.
+        data_ds shape: (channels, n_ds)
+        """
+        if self.ring is None or self.ring.count == 0:
+            return [], None, 0, 1, 1.0
+    
+        window_s = self.get_time_window_seconds()
+        try:
+            hz = float(self.acquisition_rate) if self.acquisition_rate and self.acquisition_rate > 0 else 1.0
+        except Exception:
+            hz = 1.0
+    
+        n_want = int(window_s * hz) + 5
+        snap = self.ring.snapshot_last(n_want)
+        if snap.count == 0:
+            return [], None, 0, 1, hz
+    
+        t_end = snap.times[-1]
+        t_start = t_end - window_s
+        idx0 = int(np.searchsorted(snap.times, t_start, side="left"))
+        times = snap.times[idx0:]
+        data = snap.data[:, idx0:]
+        n_raw = times.shape[0]
+        if n_raw <= 1:
+            return [], None, n_raw, 1, hz
+    
+        max_pts = int(self.max_plot_points_per_channel)
+        stride = int(np.ceil(n_raw / max_pts)) if n_raw > max_pts else 1
+    
+        times_ds = times[::stride]
+        data_ds = data[:, ::stride]
+    
+        x_dt = [datetime.fromtimestamp(ts) for ts in times_ds]
+        return x_dt, data_ds, n_raw, stride, hz
+
+    def update_statistics_from_ring(self):
+        """
+        Update per-channel stats using the currently selected time window.
+        Uses ring buffer snapshot (bounded, fast).
+        """
+        try:
+            x, data_ds, n_raw, stride, hz = self.get_window_snapshot()
+            if data_ds is None or data_ds.shape[1] == 0:
+                return
+    
+            # Stats computed on downsampled window for speed.
+            # If you want exact stats, we can compute on raw window later.
+            unit_symbol = self.get_temp_unit_symbol()
+    
+            for i in range(self.total_channels):
+                # Only compute stats for selected channels (as requested)
+                if not self.channel_selection_vars[i].get():
+                    continue
+    
+                y = data_ds[i, :]
+                if y.size == 0:
+                    continue
+    
+                # NaN-safe
+                y_min = float(np.nanmin(y))
+                y_max = float(np.nanmax(y))
+                y_avg = float(np.nanmean(y))
+    
+                if i < len(self.stats_labels):
+                    self.stats_labels[i].config(
+                        text=f"Min: {y_min:.2f} {unit_symbol} | Max: {y_max:.2f} {unit_symbol} | Avg: {y_avg:.2f} {unit_symbol}"
+                    )
+        except Exception:
+            # Keep UI safe
+            pass
+
+    def stats_timer_loop(self):
+        if not self.acquisition_running:
+            return
+        self.update_statistics_from_ring()
+        self.root.after(5000, self.stats_timer_loop)  # 5 seconds
+
+    def request_plot_rebuild(self):
+        """Mark plot for rebuild on next refresh (safe from UI callbacks)."""
+        self.plot_needs_rebuild = True
 
 def main():
     root = tk.Tk()
