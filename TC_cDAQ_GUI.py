@@ -1273,6 +1273,8 @@ class ThermocopleDAQGUI:
             self.acq_thread = threading.Thread(target=self.acquisition_loop, daemon=True)
             self.acq_thread.start()
             
+            self.root.after(1500, self.update_statistics_from_ring)
+            
             # Start plot update timer
             self.update_plot_from_ring()
             
@@ -1467,6 +1469,8 @@ class ThermocopleDAQGUI:
                                 with self.data_lock:
                                     try:
                                         self.ring.append(t_sec, data)
+                                        if sample_count % 20 == 0:
+                                            self.root.after(0, lambda c=self.ring.count: self.log_status(f"Ring samples: {c}"))
                                     except Exception:
                                         pass
                             
@@ -1537,6 +1541,8 @@ class ThermocopleDAQGUI:
                                 with self.data_lock:
                                     try:
                                         self.ring.append(t_sec, data)
+                                        if sample_count % 20 == 0:
+                                            self.root.after(0, lambda c=self.ring.count: self.log_status(f"Ring samples: {c}"))
                                     except Exception:
                                         pass
                             
@@ -2657,43 +2663,34 @@ class ThermocopleDAQGUI:
         self.root.after(refresh_s * 1000, self.update_plot_from_ring)
 
     def get_window_snapshot(self):
-        """
-        Returns (times_ds, data_ds, n_raw, stride, hz) for the current time-window,
-        downsampled to max_plot_points_per_channel.
-        times_ds are datetime objects for plotting/stats display.
-        data_ds shape: (channels, n_ds)
-        """
         if self.ring is None or self.ring.count == 0:
-            return [], None, 0, 1, 1.0
+            return None, 0, 1, 1.0
     
         window_s = self.get_time_window_seconds()
+    
+        # Take as much as available (bounded) so we never under-fetch
+        snap = self.ring.snapshot_last(min(self.ring.count, self.ring.capacity))
+        if snap.count == 0:
+            return None, 0, 1, 1.0
+    
+        t_end = snap.times[-1]
+        t_start = t_end - window_s
+    
+        idx0 = int(np.searchsorted(snap.times, t_start, side="left"))
+        data = snap.data[:, idx0:]
+        n_raw = data.shape[1]
+    
+        # compute stride for display purposes (plot uses same rule)
+        # use your configured acquisition_rate only for eff-rate display
         try:
             hz = float(self.acquisition_rate) if self.acquisition_rate and self.acquisition_rate > 0 else 1.0
         except Exception:
             hz = 1.0
     
-        n_want = int(window_s * hz) + 5
-        snap = self.ring.snapshot_last(n_want)
-        if snap.count == 0:
-            return [], None, 0, 1, hz
-    
-        t_end = snap.times[-1]
-        t_start = t_end - window_s
-        idx0 = int(np.searchsorted(snap.times, t_start, side="left"))
-        times = snap.times[idx0:]
-        data = snap.data[:, idx0:]
-        n_raw = times.shape[0]
-        if n_raw <= 1:
-            return [], None, n_raw, 1, hz
-    
         max_pts = int(self.max_plot_points_per_channel)
         stride = int(np.ceil(n_raw / max_pts)) if n_raw > max_pts else 1
     
-        times_ds = times[::stride]
-        data_ds = data[:, ::stride]
-    
-        x_dt = [datetime.fromtimestamp(ts) for ts in times_ds]
-        return x_dt, data_ds, n_raw, stride, hz
+        return data, n_raw, stride, hz
 
     def stats_timer_loop(self):
         if not self.acquisition_running:
@@ -2731,6 +2728,8 @@ class ThermocopleDAQGUI:
     
             self.stats_labels.append(lbl)
             self.stats_channel_indices.append(ch)
+            
+        self.log_status(f"Stats rows: {len(self.stats_channel_indices)} (selected channels)")
             
     def update_statistics_from_ring(self):
         """Update statistics for selected (plotted) channels using current time window from ring buffer."""
