@@ -23,7 +23,94 @@ from nptdms import TdmsWriter, RootObject, GroupObject, ChannelObject
 import csv
 import os
 import json
+from dataclasses import dataclass
+import numpy as np
 
+@dataclass
+class RingBufferSnapshot:
+    """A consistent view of ring-buffer contents (already time-ordered)."""
+    times: np.ndarray          # shape: (n,)
+    data: np.ndarray           # shape: (channels, n)
+    count: int                 # n
+    capacity: int              # total capacity
+
+
+class MultiChannelRingBuffer:
+    """
+    Fixed-size ring buffer for time series:
+    - times stored as float seconds since epoch (time.time()) for efficiency
+    - data stored as (channels, capacity) float32/float64
+    """
+    def __init__(self, channels: int, capacity: int, dtype=np.float32):
+        if channels <= 0:
+            raise ValueError("channels must be > 0")
+        if capacity <= 1:
+            raise ValueError("capacity must be > 1")
+
+        self.channels = int(channels)
+        self.capacity = int(capacity)
+        self.dtype = dtype
+
+        self._times = np.empty((self.capacity,), dtype=np.float64)
+        self._data = np.empty((self.channels, self.capacity), dtype=self.dtype)
+
+        self._write = 0          # next write index
+        self._count = 0          # number of valid samples (<= capacity)
+
+    def clear(self):
+        self._write = 0
+        self._count = 0
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def append(self, t_sec: float, values):
+        """
+        Append one multi-channel sample.
+        values must be length == channels.
+        """
+        # Convert once; keep this lightweight (called at acquisition rate)
+        v = np.asarray(values, dtype=self.dtype)
+        if v.shape[0] != self.channels:
+            raise ValueError(f"Expected {self.channels} values, got {v.shape[0]}")
+
+        idx = self._write
+        self._times[idx] = float(t_sec)
+        self._data[:, idx] = v
+
+        self._write = (self._write + 1) % self.capacity
+        self._count = min(self._count + 1, self.capacity)
+
+    def snapshot_last(self, n: int) -> RingBufferSnapshot:
+        """
+        Return the last n samples (time-ordered).
+        If n > count, returns all available.
+        """
+        if self._count == 0:
+            return RingBufferSnapshot(
+                times=np.empty((0,), dtype=np.float64),
+                data=np.empty((self.channels, 0), dtype=self.dtype),
+                count=0,
+                capacity=self.capacity,
+            )
+
+        n = int(max(0, n))
+        n = min(n, self._count)
+
+        end = self._write
+        start = (end - n) % self.capacity
+
+        if start < end:
+            times = self._times[start:end]
+            data = self._data[:, start:end]
+        else:
+            # wrapped
+            times = np.concatenate((self._times[start:], self._times[:end]), axis=0)
+            data = np.concatenate((self._data[:, start:], self._data[:, :end]), axis=1)
+
+        # return copies to prevent mutation issues if producer continues writing
+        return RingBufferSnapshot(times=times.copy(), data=data.copy(), count=n, capacity=self.capacity)
 
 class ThermocopleDAQGUI:
     def __init__(self, root):
@@ -108,6 +195,13 @@ class ThermocopleDAQGUI:
         
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # --- Plot/window performance settings (NEW) ---
+        self.max_plot_window_seconds = 7 * 24 * 3600  # 7 days
+        self.max_plot_points_per_channel = 1000
+        
+        # ring buffer will be created after modules are applied (because channel count is not known yet)
+        self.ring = None  # type: MultiChannelRingBuffer | None
         
     def create_widgets(self):
         # Main container with notebook (tabs)
