@@ -181,14 +181,29 @@ class ConverterGUI(tk.Tk):
         self.trigger_combobox = ttk.Combobox(opts, values=[], width=64); self.trigger_combobox.set(""); self.trigger_combobox.grid(row=0, column=1, sticky=tk.W)
         ttk.Label(opts, text="Trigger Signal (optional):").grid(row=1, column=0, sticky=tk.W)
         self.trigger_signal_var = tk.StringVar(value="8"); ttk.Entry(opts, textvariable=self.trigger_signal_var, width=12).grid(row=1, column=1, sticky=tk.W)
-        ttk.Label(opts, text="Output frequency (Hz) (optional):").grid(row=2, column=0, sticky=tk.W)
+        
         self.output_freq_var = tk.StringVar(value="")  # empty means no downsample
+        self.stride_var = tk.StringVar(value="")  # empty means no stride override
+        
+        # existing row=2 (frequency)
+        ttk.Label(opts, text="Output frequency (Hz) (optional):").grid(row=2, column=0, sticky=tk.W)
         ttk.Entry(opts, textvariable=self.output_freq_var, width=12).grid(row=2, column=1, sticky=tk.W)
         ttk.Label(opts, text="(e.g. 1 for 1 Hz from 10 Hz)").grid(row=2, column=1, sticky=tk.W, padx=(120,0))
-        self.sort_files_var = tk.BooleanVar(value=True); ttk.Checkbutton(opts, text="Sort files alphabetically", variable=self.sort_files_var).grid(row=3, column=0, sticky=tk.W)
-        self.streaming_var = tk.BooleanVar(value=False); ttk.Checkbutton(opts, text="Memory-safe streaming (append per file)", variable=self.streaming_var).grid(row=3, column=1, sticky=tk.W)
-        ttk.Label(opts, text="Output filename:").grid(row=4, column=0, sticky=tk.W, pady=(6, 0))
-        self.outname_var = tk.StringVar(value=""); ttk.Entry(opts, textvariable=self.outname_var, width=50).grid(row=4, column=1, sticky=tk.W, pady=(6, 0))
+        
+        # NEW row=3 (stride)
+        ttk.Label(opts, text="Samples to be skipped or Strides (optional):").grid(row=3, column=0, sticky=tk.W)
+        ttk.Entry(opts, textvariable=self.stride_var, width=12).grid(row=3, column=1, sticky=tk.W)
+        ttk.Label(opts, text="(seconds per sample = 1/frequency)").grid(row=3, column=1, sticky=tk.W, padx=(120,0))
+        
+        self.sort_files_var = tk.BooleanVar(value=True); 
+        ttk.Checkbutton(opts, text="Sort files alphabetically", 
+                        variable=self.sort_files_var).grid(row=4, column=0, sticky=tk.W)
+        self.streaming_var = tk.BooleanVar(value=False); 
+        ttk.Checkbutton(opts, text="Memory-safe streaming (append per file)", 
+                        variable=self.streaming_var).grid(row=4, column=1, sticky=tk.W)
+        ttk.Label(opts, text="Output filename:").grid(row=5, column=0, sticky=tk.W, pady=(6, 0))
+        self.outname_var = tk.StringVar(value=""); 
+        ttk.Entry(opts, textvariable=self.outname_var, width=50).grid(row=5, column=1, sticky=tk.W, pady=(6, 0))
 
         middle = ttk.Frame(frm); middle.pack(fill=tk.BOTH, expand=True, pady=(0, pad))
         left = ttk.Frame(middle); left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -211,6 +226,10 @@ class ConverterGUI(tk.Tk):
         self.progress = ttk.Progressbar(bottom, mode="determinate"); self.progress.pack(fill=tk.X, pady=(6, 4))
         ttk.Label(bottom, text="Log:").pack(anchor=tk.W)
         self.log_widget = ScrolledText(bottom, height=12); self.log_widget.pack(fill=tk.BOTH, expand=True)
+        
+        self._syncing = False
+        self.output_freq_var.trace_add("write", self._sync_freq_to_stride)
+        self.stride_var.trace_add("write", self._sync_stride_to_freq)
 
     def browse_source(self):
         p = filedialog.askdirectory(title="Select Folder Containing TDMS Files")
@@ -326,21 +345,47 @@ class ConverterGUI(tk.Tk):
                 return
             self.streaming_var.set(False)
 
-        # parse output frequency
+        # parse output frequency / stride
         output_freq = None
+        stride_sec = None
+        
         if downsample:
-            val = self.output_freq_var.get().strip()
-            if val != "":
+            f_val = self.output_freq_var.get().strip()
+            s_val = self.stride_var.get().strip()
+        
+            def parse_pos_float(x):
                 try:
-                    output_freq = float(val)
-                    if output_freq <= 0:
+                    if x == "":
+                        return None
+                    v = float(x)
+                    if v <= 0:
                         raise ValueError()
+                    return v
                 except Exception:
-                    messagebox.showerror("Invalid Output Frequency", "Please enter a valid positive number for Output frequency (Hz).")
-                    return
-            else:
-                messagebox.showerror("Output Frequency required", "Please enter Output frequency (Hz) when choosing 'Start Conversion (with frequency)'.")
+                    return "invalid"
+        
+            f = parse_pos_float(f_val)
+            s = parse_pos_float(s_val)
+        
+            if f == "invalid":
+                messagebox.showerror("Invalid Output Frequency", "Please enter a valid positive number for Output frequency (Hz).")
                 return
+            if s == "invalid":
+                messagebox.showerror("Invalid Stride", "Please enter a valid positive number for Stride (seconds per sample).")
+                return
+        
+            if f is None and s is None:
+                messagebox.showerror("Frequency or Stride required",
+                                     "Please enter either Output frequency (Hz) OR Stride when choosing 'Start Conversion (with frequency)'.")
+                return
+        
+            if f is None and s is not None:
+                # derive frequency from stride
+                output_freq = 1.0 / s
+                stride_sec = s
+            else:
+                output_freq = f
+                stride_sec = 1.0 / f if f is not None else None
 
         options = {
             "src": src, "files": files, "outpath": outpath,
@@ -348,7 +393,9 @@ class ConverterGUI(tk.Tk):
             "timestamp_col": self.detected_timestamp_col, "tick_col": self.detected_tick_col,
             "streaming": self.streaming_var.get(), "selected_channels": selected_channels,
             "first_file_baseline_raw": self.first_file_baseline_raw, "first_file_baseline_source": self.first_file_baseline_source,
-            "trigger_signal": trigger_signal, "output_freq": output_freq,
+            "trigger_signal": trigger_signal,
+            "output_freq": output_freq,
+            "stride_sec": stride_sec,
         }
 
         try: self.log_widget.delete("1.0", tk.END)
@@ -656,7 +703,9 @@ class ConverterGUI(tk.Tk):
                             else:
                                 tmin = float(time_sec_series[valid_mask].iloc[0])
                                 tmax = float(time_sec_series[valid_mask].iloc[-1])
-                                dt = 1.0 / freq
+                                stride_sec = options.get("stride_sec", None)
+                                freq = float(output_freq)
+                                dt = float(stride_sec) if stride_sec is not None else (1.0 / freq)
                                 # build target times from tmin to tmax inclusive
                                 n_steps = int(np.floor((tmax - tmin) / dt)) + 1
                                 targets = tmin + np.arange(n_steps) * dt
@@ -718,6 +767,42 @@ class ConverterGUI(tk.Tk):
         finally:
             try: self.queue.put(("progress", len(files)))
             except Exception: pass
+
+    def _safe_float(self, s: str):
+        try:
+            s = (s or "").strip()
+            if s == "":
+                return None
+            return float(s)
+        except Exception:
+            return None
+    
+    def _sync_freq_to_stride(self, *_):
+        if getattr(self, "_syncing", False):
+            return
+        f = self._safe_float(self.output_freq_var.get())
+        if f is None or f <= 0:
+            return
+        stride = 1.0 / f
+        self._syncing = True
+        try:
+            # choose formatting you like; keeping a reasonable precision
+            self.stride_var.set(f"{stride:.12g}")
+        finally:
+            self._syncing = False
+    
+    def _sync_stride_to_freq(self, *_):
+        if getattr(self, "_syncing", False):
+            return
+        stride = self._safe_float(self.stride_var.get())
+        if stride is None or stride <= 0:
+            return
+        f = 1.0 / stride
+        self._syncing = True
+        try:
+            self.output_freq_var.set(f"{f:.12g}")
+        finally:
+            self._syncing = False
 
 
 def main():
